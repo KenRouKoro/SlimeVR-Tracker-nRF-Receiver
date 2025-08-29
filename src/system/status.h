@@ -28,10 +28,14 @@ enum sys_status {
 	SYS_STATUS_CONNECTION_ERROR = 2,
 	SYS_STATUS_SYSTEM_ERROR = 4,
 	SYS_STATUS_USB_CONNECTED = 8,
-	SYS_STATUS_PLUGGED = 16
+	SYS_STATUS_PLUGGED = 16,
+	SYS_STATUS_BUTTON_PRESSED = 32,
+	SYS_STATUS_PAIRING_MODE = 64
 };
 
 void set_status(enum sys_status status, bool set);
+
+bool get_status(enum sys_status status);
 
 bool status_ready(void);
 

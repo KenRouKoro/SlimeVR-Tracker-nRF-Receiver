@@ -22,14 +22,73 @@
 */
 #include "globals.h"
 #include "system/system.h"
+#include "system/led.h"
+#include "system/status.h"
+#include "connection/esb.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
+
+#define DFU_EXISTS CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+#define DFU_DBL_RESET_MEM 0x20007F7C
+#define DFU_DBL_RESET_APP 0x4ee5677e
+
+#if DFU_EXISTS
+static uint32_t *dbl_reset_mem = ((uint32_t *)DFU_DBL_RESET_MEM);
+#endif
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 int main(void)
 {
+	// Initialize LED system first
 	set_led(SYS_LED_PATTERN_ACTIVE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
+
+	// Boot sequence with button detection
+	set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_BOOT);
+
+	uint8_t reboot_counter = reboot_counter_read();
+	bool booting_from_shutdown = !reboot_counter;
+
+	// Check if button is pressed during boot
+	if (button_read())
+	{
+		LOG_INF("Button detected during boot");
+		int64_t boot_start = k_uptime_get();
+
+		while (button_read())
+		{
+			if (k_uptime_get() - boot_start > 1000)
+				set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_HIGHEST);
+			if (k_uptime_get() - boot_start > 5000)
+			{
+				LOG_INF("Boot-time pairing reset requested");
+				esb_clear();
+				break;
+			}
+			k_msleep(10);
+		}
+
+		if (k_uptime_get() - boot_start > 5000)
+			set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_HIGHEST);
+		else if (k_uptime_get() - boot_start > 50) // Short press during boot
+			set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_HIGHEST);
+	}
+	else if (booting_from_shutdown)
+	{
+		set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_BOOT);
+	}
+
+	// Clear boot LED priority
+	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_BOOT);
+
+	LOG_INF("SlimeVR Receiver initialized with button support");
+	LOG_INF("Button functions:");
+	LOG_INF("  Short press (1x): Status check");
+	LOG_INF("  Quick press (2x): Exit pairing mode");
+	LOG_INF("  Quick press (3x): Enter pairing mode");
+	LOG_INF("  Long press (5s): Clear all pairings");
+	LOG_INF("  Long press (10s): Enter DFU mode");
 
 	return 0;
 }

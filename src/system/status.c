@@ -53,6 +53,12 @@ void set_status(enum sys_status status, bool set) {
 			case SYS_STATUS_PLUGGED:
 				LOG_INF("Charger plugged");
 				break;
+			case SYS_STATUS_BUTTON_PRESSED:
+				LOG_INF("Button pressed");
+				break;
+			case SYS_STATUS_PAIRING_MODE:
+				LOG_INF("Pairing mode active");
+				break;
 			default:
 				break;
 		}
@@ -61,6 +67,11 @@ void set_status(enum sys_status status, bool set) {
 		LOG_INF("Cleared status: %d", status);
 	}
 	LOG_INF("Status: %d", status_state);
+}
+
+bool get_status(enum sys_status status)
+{
+	return status_state & status;
 }
 
 static void status_thread(void) {

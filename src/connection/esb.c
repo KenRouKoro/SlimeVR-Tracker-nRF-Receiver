@@ -357,6 +357,21 @@ void esb_parse_pair()
 	tx_payload_pair.data[1] = send_tracker_id; // Add tracker id to packet
 }
 
+void esb_start_pairing(void)
+{
+	LOG_INF("Starting pairing mode (non-blocking)");
+	esb_set_addr_discovery();
+	esb_initialize(false);
+	esb_start_rx();
+	tx_payload_pair.noack = false;
+	uint64_t *addr = (uint64_t *)NRF_FICR->DEVICEADDR;
+	memcpy(&tx_payload_pair.data[2], addr, 6);
+	LOG_INF("Device address: %012llX", *addr & 0xFFFFFFFFFFFF);
+	set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
+	esb_pairing = true;
+	pairing_buf[1] = 255; // initialize packet flag
+}
+
 void esb_pair(void)
 {
 	LOG_INF("Pairing");
