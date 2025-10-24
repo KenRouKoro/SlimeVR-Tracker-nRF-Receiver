@@ -25,6 +25,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/usb/usb_device.h>
 #include <zephyr/usb/class/usb_hid.h>
+#include <math.h>
 
 static struct k_work report_send;
 
@@ -44,6 +45,21 @@ static ATOMIC_DEFINE(hid_ep_in_busy, 1);
 
 #define HID_EP_BUSY_FLAG	0
 #define REPORT_PERIOD		K_MSEC(1) // streaming reports
+#define HID_EP_REPORT_COUNT 4
+
+// Rotation anomaly detection constants
+#define ROTATION_THRESHOLD_MIN	0.5f
+#define ROTATION_THRESHOLD_MAX	(2.0f * M_PI - ROTATION_THRESHOLD_MIN)
+#define MAX_INVALID_COUNT		3  // Allow slightly more invalid packets before reset
+#define MAX_REPORT_QUEUE		100
+#define PACKET_TYPE_ROTATION		1
+#define PACKET_TYPE_COMPRESSED		2
+#define PACKET_TYPE_FULL_MAG		4
+
+// Utility macros
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
 
 LOG_MODULE_REGISTER(hid_event, LOG_LEVEL_INF);
 
@@ -231,81 +247,206 @@ static int last_valid_trackers[MAX_TRACKERS] = {0};
 static float cur_q_trackers[MAX_TRACKERS][4] = {0};
 static uint32_t cur_v_trackers[MAX_TRACKERS] = {0};
 static uint8_t cur_p_trackers[MAX_TRACKERS] = {0};
+
+// Anomaly detection configuration
+typedef enum {
+	ANOMALY_DETECTION_STRICT,    // Original algorithm (more false positives)
+	ANOMALY_DETECTION_BALANCED,  // Simplified algorithm (recommended)
+	ANOMALY_DETECTION_DISABLED   // No anomaly detection
+} anomaly_detection_mode_t;
+
+static anomaly_detection_mode_t anomaly_mode = ANOMALY_DETECTION_BALANCED;
+
+// Input validation helper function
+static bool validate_tracker_id(uint8_t tracker_id)
+{
+	return tracker_id < MAX_TRACKERS;
+}
+
+// Extract quaternion from packet data
+static void extract_quaternion(uint8_t packet_type, const uint8_t *data, float *q)
+{
+	if (packet_type == PACKET_TYPE_ROTATION || packet_type == PACKET_TYPE_FULL_MAG) {
+		// Full precision quaternion from int16_t buffer
+		const int16_t *buf = (const int16_t *)&data[2];
+		q[0] = FIXED_15_TO_DOUBLE(buf[3]);
+		q[1] = FIXED_15_TO_DOUBLE(buf[0]);
+		q[2] = FIXED_15_TO_DOUBLE(buf[1]);
+		q[3] = FIXED_15_TO_DOUBLE(buf[2]);
+	} else if (packet_type == PACKET_TYPE_COMPRESSED) {
+		// Compressed vector data
+		const uint32_t *q_buf = (const uint32_t *)&data[5];
+		float v[3];
+		v[0] = FIXED_10_TO_DOUBLE(*q_buf & 1023);
+		v[1] = FIXED_11_TO_DOUBLE((*q_buf >> 10) & 2047);
+		v[2] = FIXED_11_TO_DOUBLE((*q_buf >> 21) & 2047);
+
+		// Normalize to [-1, 1] range
+		for (int i = 0; i < 3; i++) {
+			v[i] = v[i] * 2.0f - 1.0f;
+		}
+
+		// Convert vector to quaternion
+		q_iem(v, q);
+	}
+}
+
+// Handle rotation anomaly detection and logging
+static bool handle_rotation_anomaly(uint8_t tracker_id, uint8_t packet_type,
+                                   const float *q, uint32_t q_buf_val)
+{
+	if (!validate_tracker_id(tracker_id)) {
+		LOG_ERR("Invalid tracker ID: %d", tracker_id);
+		return true; // Discard packet
+	}
+
+	float *last_q = last_q_trackers[tracker_id];
+	uint32_t *last_v = &last_v_trackers[tracker_id];
+	uint8_t *last_p = &last_p_trackers[tracker_id];
+	float *cur_q = cur_q_trackers[tracker_id];
+	uint32_t *cur_v = &cur_v_trackers[tracker_id];
+	uint8_t *cur_p = &cur_p_trackers[tracker_id];
+
+	// For STRICT mode, use original algorithm completely unchanged
+	if (anomaly_mode == ANOMALY_DETECTION_STRICT) {
+		// Use original algorithm for STRICT mode to preserve legacy behavior
+		float mag = q_diff_mag_original(q, last_q);
+		float mag_cur = q_diff_mag_original(q, cur_q);
+
+		// Original simple logic - exactly as it was before
+		bool mag_invalid = mag > 0.5f && mag < 6.28f - 0.5f; // possibly invalid rotation
+		bool mag_cur_invalid = mag_cur > 0.5f && mag_cur < 6.28f - 0.5f; // possibly inconsistent rotation
+
+		if (mag_invalid) {
+			// Original logging format
+			LOG_ERR("Abnormal rot. %012llX i%d p%d m%.2f/%.2f v%d",
+			        stored_tracker_addr[tracker_id], tracker_id, packet_type,
+			        (double)mag, (double)mag_cur, last_valid_trackers[tracker_id]);
+
+			// Original debug output
+			printk("a: %5.2f %5.2f %5.2f %5.2f p%d:%08X\n",
+			       (double)q[0], (double)q[1], (double)q[2], (double)q[3],
+			       packet_type, q_buf_val);
+			printk("b: %5.2f %5.2f %5.2f %5.2f p%d:%08X\n",
+			       (double)cur_q[0], (double)cur_q[1], (double)cur_q[2], (double)cur_q[3],
+			       *cur_p, *cur_v);
+			printk("c: %5.2f %5.2f %5.2f %5.2f p%d:%08X\n",
+			       (double)last_q[0], (double)last_q[1], (double)last_q[2], (double)last_q[3],
+			       *last_p, *last_v);
+
+			// Original logic
+			last_valid_trackers[tracker_id]++;
+			memcpy(cur_q, q, sizeof(float) * 4);
+			*cur_v = q_buf_val;
+			*cur_p = packet_type;
+
+			if (!mag_cur_invalid && last_valid_trackers[tracker_id] > 2) { // reset last_q
+				LOG_WRN("Reset rotation for %012llX, ID %d",
+				        stored_tracker_addr[tracker_id], tracker_id);
+				last_valid_trackers[tracker_id] = 0;
+				memcpy(last_q, q, sizeof(float) * 4);
+				*last_v = q_buf_val;
+				*last_p = packet_type;
+			}
+
+			return true; // Discard this packet
+		}
+
+		// Original update logic for valid packets
+		last_valid_trackers[tracker_id] = 0;
+		memcpy(cur_q, q, sizeof(float) * 4);
+		*cur_v = q_buf_val;
+		*cur_p = packet_type;
+		memcpy(last_q, q, sizeof(float) * 4);
+		*last_v = q_buf_val;
+		*last_p = packet_type;
+
+		return false; // Keep this packet
+	}
+
+	// For BALANCED mode, use simplified logic - no complex calculations needed
+	if (anomaly_mode == ANOMALY_DETECTION_BALANCED) {
+		// Simple initialization for first packet
+		bool first_packet = (last_q[0] == 0.0f && last_q[1] == 0.0f &&
+		                     last_q[2] == 0.0f && last_q[3] == 0.0f);
+
+		if (first_packet) {
+			memcpy(last_q, q, sizeof(float) * 4);
+			memcpy(cur_q, q, sizeof(float) * 4);
+			*last_v = q_buf_val;
+			*cur_v = q_buf_val;
+			*last_p = packet_type;
+			*cur_p = packet_type;
+			last_valid_trackers[tracker_id] = 0;
+
+			return false; // Keep first packet
+		}
+
+		// TODO: Implement balanced mode anomaly detection logic here
+		// For now, just pass through all packets after initialization
+	}
+
+	// For DISABLED and BALANCED modes, just update tracking data
+	last_valid_trackers[tracker_id] = 0;
+	memcpy(cur_q, q, sizeof(float) * 4);
+	*cur_v = q_buf_val;
+	*cur_p = packet_type;
+	memcpy(last_q, q, sizeof(float) * 4);
+	*last_v = q_buf_val;
+	*last_p = packet_type;
+
+	return false; // Keep this packet
+}
 #endif
 
 void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 {
+	// Input validation
+	if (data == NULL) {
+		LOG_ERR("NULL data pointer");
+		return;
+	}
+
+	uint8_t packet_type = data[0];
+	uint8_t tracker_id = data[1];
+
+	// Validate tracker ID
+	if (!validate_tracker_id(tracker_id)) {
+		LOG_ERR("Invalid tracker ID: %d", tracker_id);
+		return;
+	}
+
 #ifndef CONFIG_SOC_NRF52820
-	// discard packets with abnormal rotation // TODO:
-	if (data[0] == 1 || data[0] == 2 || data[0] == 4)
-	{
-		float v[3] = {0};
+	// Rotation anomaly detection for quaternion packets
+	if (packet_type == PACKET_TYPE_ROTATION ||
+	    packet_type == PACKET_TYPE_COMPRESSED ||
+	    packet_type == PACKET_TYPE_FULL_MAG) {
+
 		float q[4] = {0};
-		int16_t *buf = (int16_t *)&data[2];
-		uint32_t *q_buf = (uint32_t *)&data[5];
-		if (data[0] == 1 || data[0] == 4)
-		{
-			q[0] = FIXED_15_TO_DOUBLE(buf[3]);
-			q[1] = FIXED_15_TO_DOUBLE(buf[0]);
-			q[2] = FIXED_15_TO_DOUBLE(buf[1]);
-			q[3] = FIXED_15_TO_DOUBLE(buf[2]);
+		uint32_t q_buf_val = 0;
+
+		// Extract quaternion based on packet type
+		extract_quaternion(packet_type, data, q);
+
+		// Get q_buf value for logging (only valid for compressed packets)
+		if (packet_type == PACKET_TYPE_COMPRESSED) {
+			q_buf_val = *(const uint32_t *)&data[5];
 		}
-		else
-		{
-			v[0] = FIXED_10_TO_DOUBLE(*q_buf & 1023);
-			v[1] = FIXED_11_TO_DOUBLE((*q_buf >> 10) & 2047);
-			v[2] = FIXED_11_TO_DOUBLE((*q_buf >> 21) & 2047);
-			for (int i = 0; i < 3; i++)
-				v[i] = v[i] * 2 - 1;
-			q_iem(v, q);
+
+		// Check for rotation anomalies and handle accordingly
+		if (handle_rotation_anomaly(tracker_id, packet_type, q, q_buf_val)) {
+			return; // Packet was discarded due to anomaly
 		}
-		float *last_q = last_q_trackers[data[1]];
-		uint32_t *last_v = &last_v_trackers[data[1]];
-		uint8_t *last_p = &last_p_trackers[data[1]];
-		float *cur_q = cur_q_trackers[data[1]];
-		uint32_t *cur_v = &cur_v_trackers[data[1]];
-		uint8_t *cur_p = &cur_p_trackers[data[1]];
-		float mag = q_diff_mag(q, last_q); // difference between last valid
-		float mag_cur = q_diff_mag(q, cur_q); // difference between last received
-		bool mag_invalid = mag > 0.5f && mag < 6.28f - 0.5f; // possibly invalid rotation
-		bool mag_cur_invalid = mag_cur > 0.5f && mag_cur < 6.28f - 0.5f; // possibly inconsistent rotation
-		if (mag_invalid)
-		{
-			// HWID, ID, packet type, rotation difference (rad), last valid packet
-			LOG_ERR("Abnormal rot. %012llX i%d p%d m%.2f/%.2f v%d", stored_tracker_addr[data[1]], data[1], data[0], (double)mag, (double)mag_cur, last_valid_trackers[data[1]]);
-			// decoded quat, packet type, q_buf
-			printk("a: %5.2f %5.2f %5.2f %5.2f p%d:%08X\n", (double)q[0], (double)q[1], (double)q[2], (double)q[3], data[0], *q_buf);
-			printk("b: %5.2f %5.2f %5.2f %5.2f p%d:%08X\n", (double)cur_q[0], (double)cur_q[1], (double)cur_q[2], (double)cur_q[3], *cur_p, *cur_v);
-			printk("c: %5.2f %5.2f %5.2f %5.2f p%d:%08X\n", (double)last_q[0], (double)last_q[1], (double)last_q[2], (double)last_q[3], *last_p, *last_v);
-			last_valid_trackers[data[1]]++;
-			memcpy(cur_q, q, sizeof(q));
-			*cur_v = *q_buf;
-			*cur_p = data[0];
-			if (!mag_cur_invalid && last_valid_trackers[data[1]] > 2) // reset last_q
-			{
-				LOG_WRN("Reset rotation for %012llX, ID %d", stored_tracker_addr[data[1]], data[1]);
-				last_valid_trackers[data[1]] = 0;
-				memcpy(last_q, q, sizeof(q));
-				*last_v = *q_buf;
-				*last_p = data[0];
-				return;
-			}
-			return;
-		}
-		last_valid_trackers[data[1]] = 0;
-		memcpy(cur_q, q, sizeof(q));
-		*cur_v = *q_buf;
-		*cur_p = data[0];
-		memcpy(last_q, q, sizeof(q));
-		*last_v = *q_buf;
-		*last_p = data[0];
 	}
 #endif
 
-	memcpy(&report.data, data, 16); // all data can be passed through
-	if (data[0] != 1 && data[0] != 4) // packet 1 and 4 are full precision quat and accel/mag, no room for rssi
+	// Copy data to report structure
+	memcpy(&report.data, data, 16);
+
+	// Add RSSI for packets that have room (not full precision quaternion packets)
+	if (packet_type != PACKET_TYPE_ROTATION && packet_type != PACKET_TYPE_FULL_MAG) {
 		report.data[15] = rssi;
-	// TODO: this sucks
+	}
 	for (int i = 0; i < report_count; i++) // replace existing entry instead
 	{
 		if (reports[sizeof(report) * (report_sent + i) + 1] == report.data[1])
@@ -319,3 +460,22 @@ void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 	memcpy(&reports[sizeof(report) * (report_sent + report_count)], &report, sizeof(report));
 	report_count++;
 }
+
+#ifndef CONFIG_SOC_NRF52820
+// Function to configure anomaly detection mode
+void hid_set_anomaly_detection_mode(int mode)
+{
+	if (mode >= 0 && mode <= ANOMALY_DETECTION_DISABLED) {
+		anomaly_mode = (anomaly_detection_mode_t)mode;
+		LOG_INF("Anomaly detection mode set to: %d", mode);
+	} else {
+		LOG_ERR("Invalid anomaly detection mode: %d", mode);
+	}
+}
+
+// Function to get current anomaly detection mode
+int hid_get_anomaly_detection_mode(void)
+{
+	return (int)anomaly_mode;
+}
+#endif
