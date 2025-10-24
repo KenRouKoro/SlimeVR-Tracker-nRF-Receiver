@@ -23,6 +23,7 @@
 #include "globals.h"
 #include "system/system.h"
 #include "build_defines.h"
+#include "hid.h"
 
 #define USB DT_NODELABEL(usbd)
 #if DT_NODE_HAS_STATUS(USB, okay)
@@ -160,6 +161,41 @@ static void print_list(void)
 		printk("%012llX\n", stored_tracker_addr[i]);
 }
 
+#ifndef CONFIG_SOC_NRF52820
+static void print_anomaly_detection_info(void)
+{
+	int current_mode = hid_get_anomaly_detection_mode();
+	const char* mode_names[] = {
+		"ORIGINAL    (exact replica of original simple algorithm)",
+		"BALANCED  (recommended, fixed algorithm)",
+		"DISABLED  (no anomaly detection)"
+	};
+
+	printk("Current anomaly detection mode: %d - %s\n", current_mode,
+	       (current_mode >= 0 && current_mode <= 3) ? mode_names[current_mode] : "UNKNOWN");
+}
+
+static void set_anomaly_detection_mode(const char* arg)
+{
+	if (!arg) {
+		printk("Usage: anomaly <mode>\n");
+		printk("Modes:\n");
+		printk("  0=ORIGINAL   (original simple algorithm before any changes)\n");
+		printk("  1=BALANCED (recommended, improved algorithm)\n");
+		printk("  2=DISABLED (raw data passthrough)\n");
+		return;
+	}
+
+	int mode = strtol(arg, NULL, 10);
+	if (mode >= 0 && mode <= 2) {
+		hid_set_anomaly_detection_mode(mode);
+		print_anomaly_detection_info();
+	} else {
+		printk("Invalid mode: %d. Valid modes: 0-2\n", mode);
+	}
+}
+#endif
+
 static void console_thread(void)
 {
 	console_getline_init();
@@ -178,6 +214,11 @@ static void console_thread(void)
 	printk("exit                         Exit pairing mode\n");
 	printk("clear                        Clear stored devices\n");
 
+#ifndef CONFIG_SOC_NRF52820
+	printk("anomaly [mode]               Configure anomaly detection (0-2)\n");
+	printk("anomaly_info                 Show anomaly detection info\n");
+#endif
+
 	uint8_t command_info[] = "info";
 	uint8_t command_uptime[] = "uptime";
 	uint8_t command_list[] = "list";
@@ -187,6 +228,11 @@ static void console_thread(void)
 	uint8_t command_pair[] = "pair";
 	uint8_t command_exit[] = "exit";
 	uint8_t command_clear[] = "clear";
+
+#ifndef CONFIG_SOC_NRF52820
+	uint8_t command_anomaly[] = "anomaly";
+	uint8_t command_anomaly_info[] = "anomaly_info";
+#endif
 
 #if DFU_EXISTS
 	printk("dfu                          Enter DFU bootloader\n");
@@ -253,10 +299,24 @@ static void console_thread(void)
 		{
 			esb_finish_pair();
 		}
-		else if (memcmp(line, command_clear, sizeof(command_clear)) == 0) 
+		else if (memcmp(line, command_clear, sizeof(command_clear)) == 0)
 		{
 			esb_clear();
 		}
+#ifndef CONFIG_SOC_NRF52820
+		else if (memcmp(line, command_anomaly, sizeof(command_anomaly)) == 0)
+		{
+			if (arg) {
+				set_anomaly_detection_mode(arg);
+			} else {
+				print_anomaly_detection_info();
+			}
+		}
+		else if (memcmp(line, command_anomaly_info, sizeof(command_anomaly_info)) == 0)
+		{
+			print_anomaly_detection_info();
+		}
+#endif
 #if DFU_EXISTS
 		else if (memcmp(line, command_dfu, sizeof(command_dfu)) == 0)
 		{
@@ -269,7 +329,7 @@ static void console_thread(void)
 #endif
 		}
 #endif
-		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) 
+		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0)
 		{
 			print_meow();
 		}
