@@ -45,6 +45,8 @@ static struct esb_payload tx_payload_sync = ESB_CREATE_PAYLOAD(0,
 
 uint8_t pairing_buf[8] = {0};
 static uint8_t discovered_trackers[MAX_TRACKERS] = {0};
+static uint8_t last_packet_sequence[MAX_TRACKERS]; // 追踪每个追踪器的最后一个包序号
+static uint8_t packet_count[MAX_TRACKERS] = {0}; // 每个追踪器接收到的包计数
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
@@ -55,6 +57,58 @@ static void esb_thread(void);
 K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 6, 0, 0);
 
 static void esb_parse_pair(void);
+
+static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
+{
+	if (tracker_id >= MAX_TRACKERS) return 2;
+
+	// 第一个包，直接接受
+	if (packet_count[tracker_id] == 0) {
+		last_packet_sequence[tracker_id] = received_seq;
+		packet_count[tracker_id] = 1;
+		return 0;
+	}
+
+	uint8_t last_seq = last_packet_sequence[tracker_id];
+	uint8_t expected_seq = (last_seq + 1) & 0xFF;
+
+	// 正常的下一个序号
+	if (received_seq == expected_seq) {
+		last_packet_sequence[tracker_id] = received_seq;
+		packet_count[tracker_id]++;
+		return 0;
+	}
+
+	// 计算序号差值（考虑循环）
+	uint8_t diff_forward = (received_seq - last_seq) & 0xFF;  // 向前差值
+	uint8_t diff_backward = (last_seq - received_seq) & 0xFF; // 向后差值
+
+	// 如果是向前的小跳跃（1-16），可能是丢包
+	if (diff_forward <= 16) {
+		LOG_DBG("Possible packet loss for tracker %d: last=%d, received=%d, gap=%d",
+				tracker_id, last_seq, received_seq, diff_forward - 1);
+		last_packet_sequence[tracker_id] = received_seq;
+		packet_count[tracker_id]++;
+		return 1;
+	}
+
+	// 如果是向后的小差值（1-5），可能是重复或乱序
+	if (diff_backward <= 5) {
+		LOG_WRN("Duplicate or out-of-order packet for tracker %d: last=%d, received=%d",
+				tracker_id, last_seq, received_seq);
+		// 不更新last_packet_sequence，因为这可能是旧包
+		return 2;
+	}
+
+	// 大跳跃，可能是追踪器重启
+	LOG_WRN("Large sequence jump for tracker %d: last=%d, received=%d, forward_diff=%d",
+			tracker_id, last_seq, received_seq, diff_forward);
+
+	// 重置该追踪器的状态
+	last_packet_sequence[tracker_id] = received_seq;
+	packet_count[tracker_id] = 1;
+	return 3;
+}
 
 void event_handler(struct esb_evt const *event)
 {
@@ -89,29 +143,85 @@ void event_handler(struct esb_evt const *event)
 					break;
 				}
 				break;
-			case 20: // has crc32
-				uint32_t crc_check = crc32_k_4_2_update(0x93a409eb, rx_payload.data, 16);
-				uint32_t *crc_ptr = (uint32_t *)&rx_payload.data[16];
-				if (*crc_ptr != crc_check)
+			case 21: // 16 bytes data + 4 bytes CRC32 + 1 byte sequence number
 				{
-					LOG_ERR("Incorrect checksum, computed %08X, received %08X", crc_check, *crc_ptr);
-					printk("%016llX%016llX\n", *(uint64_t *)&rx_payload.data[8], *(uint64_t *)rx_payload.data);
-					break;
+					uint32_t crc_check = crc32_k_4_2_update(0x93a409eb, rx_payload.data, 16);
+					uint32_t *crc_ptr = (uint32_t *)&rx_payload.data[16];
+					if (*crc_ptr != crc_check)
+					{
+						LOG_ERR("Incorrect checksum, computed %08X, received %08X", crc_check, *crc_ptr);
+						printk("%08llx%016llX%016llX\n", *(uint64_t *)&rx_payload.data[16] & 0XFFFFFFFF, *(uint64_t *)&rx_payload.data[8], *(uint64_t *)rx_payload.data);
+						break;
+					}
+
+					uint8_t imu_id = rx_payload.data[1];
+					if (imu_id >= stored_trackers) // not a stored tracker
+						return;
+					if (discovered_trackers[imu_id] < DETECTION_THRESHOLD) // garbage filtering of nonexistent tracker
+					{
+						discovered_trackers[imu_id]++;
+						return;
+					}
+					if (rx_payload.data[0] > 223) // reserved for receiver only
+						break;
+
+					// 智能验证包序号
+					uint8_t received_sequence = rx_payload.data[20];
+					int seq_result = check_packet_sequence(imu_id, received_sequence);
+
+					// 根据序号检查结果决定是否转发数据包
+					// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启
+					if (seq_result == 2) {
+						// 乱序包，丢弃不转发
+						LOG_WRN("Discarding out-of-order packet for tracker %d", imu_id);
+						break;
+					}
+
+					// 其他情况（正常、丢包、重启）都转发数据包
+					hid_write_packet_n(rx_payload.data, rx_payload.rssi); // write to hid endpoint
 				}
-			// case 16:
-				uint8_t imu_id = rx_payload.data[1];
-				if (imu_id >= stored_trackers) // not a stored tracker
-					return;
-				if (discovered_trackers[imu_id] < DETECTION_THRESHOLD) // garbage filtering of nonexistent tracker
+				break;
+			case 20: // has crc32 (legacy format without sequence number)
 				{
-					discovered_trackers[imu_id]++;
-					return;
+					uint32_t crc_check = crc32_k_4_2_update(0x93a409eb, rx_payload.data, 16);
+					uint32_t *crc_ptr = (uint32_t *)&rx_payload.data[16];
+					if (*crc_ptr != crc_check)
+					{
+						LOG_ERR("Incorrect checksum, computed %08X, received %08X", crc_check, *crc_ptr);
+						printk("%08llx%016llX%016llX\n", *(uint64_t *)&rx_payload.data[16] & 0XFFFFFFFF, *(uint64_t *)&rx_payload.data[8], *(uint64_t *)rx_payload.data);
+						break;
+					}
+
+					uint8_t imu_id = rx_payload.data[1];
+					if (imu_id >= stored_trackers) // not a stored tracker
+						return;
+					if (discovered_trackers[imu_id] < DETECTION_THRESHOLD) // garbage filtering of nonexistent tracker
+					{
+						discovered_trackers[imu_id]++;
+						return;
+					}
+					if (rx_payload.data[0] > 223) // reserved for receiver only
+						break;
+					hid_write_packet_n(rx_payload.data, rx_payload.rssi); // write to hid endpoint
 				}
-				if (rx_payload.data[0] > 223) // reserved for receiver only
-					break;
-				hid_write_packet_n(rx_payload.data, rx_payload.rssi); // write to hid endpoint
+				break;
+			case 16: // legacy format without CRC
+				{
+					uint8_t imu_id = rx_payload.data[1];
+					if (imu_id >= stored_trackers) // not a stored tracker
+						return;
+					if (discovered_trackers[imu_id] < DETECTION_THRESHOLD) // garbage filtering of nonexistent tracker
+					{
+						discovered_trackers[imu_id]++;
+						return;
+					}
+					if (rx_payload.data[0] > 223) // reserved for receiver only
+						break;
+					hid_write_packet_n(rx_payload.data, rx_payload.rssi); // write to hid endpoint
+				}
 				break;
 			default:
+				LOG_ERR("Wrong packet length: %d", rx_payload.length);
 				break;
 			}
 		}
@@ -451,6 +561,27 @@ void esb_clear(void)
 	sys_write(STORED_TRACKERS, NULL, &stored_trackers, sizeof(stored_trackers));
 	LOG_INF("NVS Reset");
 	esb_reset_pair();
+
+	// 重置所有追踪器的包序号状态
+	for (int i = 0; i < MAX_TRACKERS; i++)
+	{
+		last_packet_sequence[i] = 0;
+		packet_count[i] = 0;
+		discovered_trackers[i] = 0;
+	}
+	LOG_INF("Packet sequence state reset for all trackers");
+}
+
+// 重置特定追踪器的包序号状态
+void esb_reset_tracker_sequence(uint8_t tracker_id)
+{
+	if (tracker_id < MAX_TRACKERS)
+	{
+		last_packet_sequence[tracker_id] = 0;
+		packet_count[tracker_id] = 0;
+		discovered_trackers[tracker_id] = 0;
+		LOG_INF("Packet sequence state reset for tracker %d", tracker_id);
+	}
 }
 
 // TODO:
