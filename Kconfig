@@ -52,4 +52,17 @@ config LED_DEFAULT_COLOR_B
 
 endmenu
 
+config RADIO_RF_CHANNEL
+    int "Radio RF channel"
+    default 2
+    help
+        Radio RF channel (0-100).
+        Must match the receiver channel.
+
+config RADIO_RETRANSMIT_DELAY
+    int "Radio retransmit delay (µs)"
+    default 600
+    help
+        Radio retransmit delay.
+
 source "Kconfig.zephyr"

@@ -24,10 +24,14 @@
 #include "system/system.h"
 #include "hid.h"
 
+#include <stdlib.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/sys/crc.h>
 
 #include "esb.h"
+
+#define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
+#define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 
 static struct esb_payload rx_payload;
 //static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
@@ -85,7 +89,16 @@ void event_handler(struct esb_evt const *event)
 					break;
 				}
 				break;
-			case 16:
+			case 20: // has crc32
+				uint32_t crc_check = crc32_k_4_2_update(0x93a409eb, rx_payload.data, 16);
+				uint32_t *crc_ptr = (uint32_t *)&rx_payload.data[16];
+				if (*crc_ptr != crc_check)
+				{
+					LOG_ERR("Incorrect checksum, computed %08X, received %08X", crc_check, *crc_ptr);
+					printk("%016llX%016llX\n", *(uint64_t *)&rx_payload.data[8], *(uint64_t *)rx_payload.data);
+					break;
+				}
+			// case 16:
 				uint8_t imu_id = rx_payload.data[1];
 				if (imu_id >= stored_trackers) // not a stored tracker
 					return;
@@ -170,6 +183,10 @@ int esb_initialize(bool tx)
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
 
+	// Add jitter to retransmit delay to avoid collisions
+	uint16_t jitter = (rand() % 200) - 100;  // ±100 µs
+	uint16_t retransmit_delay_with_jitter = RADIO_RETRANSMIT_DELAY + jitter;
+
 	if (tx)
 	{
 		// config.protocol = ESB_PROTOCOL_ESB_DPL;
@@ -178,7 +195,7 @@ int esb_initialize(bool tx)
 		// config.bitrate = ESB_BITRATE_2MBPS;
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = 30;
-		// config.retransmit_delay = 600;
+		config.retransmit_delay = retransmit_delay_with_jitter;
 		config.retransmit_count = 0;
 		config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
@@ -193,7 +210,7 @@ int esb_initialize(bool tx)
 		// config.bitrate = ESB_BITRATE_2MBPS;
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = 30;
-		// config.retransmit_delay = 600;
+		config.retransmit_delay = retransmit_delay_with_jitter;
 		// config.retransmit_count = 3;
 		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
@@ -203,6 +220,9 @@ int esb_initialize(bool tx)
 
 	LOG_INF("Initializing ESB, %sX mode", tx ? "T" : "R");
 	err = esb_init(&config);
+
+	if (!err)
+		esb_set_rf_channel(RADIO_RF_CHANNEL);
 
 	if (!err)
 		esb_set_base_address_0(base_addr_0);
