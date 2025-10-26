@@ -83,18 +83,24 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 	uint8_t diff_forward = (received_seq - last_seq) & 0xFF;  // 向前差值
 	uint8_t diff_backward = (last_seq - received_seq) & 0xFF; // 向后差值
 
-	// 如果是向前的小跳跃（1-32），可能是丢包
-	if (diff_forward <= 32) {
+	if (diff_forward == 0) {
+		// 重复包，忽略
+		LOG_DBG("Duplicate packet for tracker %d: seq=%d", tracker_id, received_seq);
+		return 4;
+	}
+
+	// 如果是向前的小跳跃（1-8），可能是丢包
+	if (diff_forward > 0 && diff_forward <= 8) {
 		LOG_WRN("Possible packet loss for tracker %d: last=%d, received=%d, gap=%d",
-				tracker_id, last_seq, received_seq, diff_forward - 1);
+				tracker_id, last_seq, received_seq, diff_forward);
 		last_packet_sequence[tracker_id] = received_seq;
 		packet_count[tracker_id]++;
 		return 1;
 	}
 
-	// 如果是向后的小差值（1-16），可能是重复或乱序
-	if (diff_backward <= 16) {
-		LOG_WRN("Duplicate or out-of-order packet for tracker %d: last=%d, received=%d",
+	// 如果是向后的小差值（1-16），可能是乱序
+	if (diff_backward > 0 && diff_backward <= 16) {
+		LOG_WRN("Out-of-order packet for tracker %d: last=%d, received=%d",
 				tracker_id, last_seq, received_seq);
 		// 不更新last_packet_sequence，因为这可能是旧包
 		return 2;
@@ -170,10 +176,10 @@ void event_handler(struct esb_evt const *event)
 					int seq_result = check_packet_sequence(imu_id, received_sequence);
 
 					// 根据序号检查结果决定是否转发数据包
-					// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启
-					if (seq_result == 2) {
-						// 乱序包，丢弃不转发
-						LOG_WRN("Discarding out-of-order packet for tracker %d", imu_id);
+					// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
+					if (seq_result == 2 || seq_result == 4) {
+						// 丢弃不转发
+						LOG_WRN("Discarding out-of-order or duplicate packet for tracker %d", imu_id);
 						break;
 					}
 
@@ -221,10 +227,11 @@ void event_handler(struct esb_evt const *event)
 					uint8_t received_sequence = rx_payload.data[16];
 					int seq_result = check_packet_sequence(imu_id, received_sequence);
 
-					// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启
-					if (seq_result == 2) {
-						// 乱序包，丢弃不转发
-						LOG_WRN("Discarding out-of-order packet for tracker %d", imu_id);
+					// 根据序号检查结果决定是否转发数据包
+					// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
+					if (seq_result == 2 || seq_result == 4) {
+						// 丢弃不转发
+						LOG_WRN("Discarding out-of-order or duplicate packet for tracker %d", imu_id);
 						break;
 					}
 
