@@ -58,31 +58,6 @@ float q_diff_mag(const float *x, const float *y)
 	float q[4];
 	q_conj(x, z);
 	q_multiply(z, y, q);
-
-	// Handle quaternion double coverage: q and -q represent the same rotation
-	// Take the absolute value of w component and ensure it's <= 1
-	float w = fabsf(q[0]);
-	if (w > 1.0f)
-		w = 1.0f;
-
-	// Calculate the rotation angle, ensuring we take the shorter path
-	float angle = 2.0f * acosf(w);
-
-	// Due to double coverage, angles > π should be treated as 2π - angle
-	if (angle > M_PI)
-		angle = 2.0f * M_PI - angle;
-
-	return angle;
-}
-
-// Original q_diff_mag algorithm (before quaternion double coverage fix)
-// This preserves the original behavior for comparison and STRICT mode
-float q_diff_mag_original(const float *x, const float *y)
-{
-	float z[4];
-	float q[4];
-	q_conj(x, z);
-	q_multiply(z, y, q);
 	if (q[0] > 1)
 		return 0;
 	return fabsf(2 * acosf(q[0]));

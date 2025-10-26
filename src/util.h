@@ -53,7 +53,6 @@ void q_normalize(const float *q, float *out);
 void q_multiply(const float *x, const float *y, float *out);
 void q_conj(const float *q, float *out);
 float q_diff_mag(const float *x, const float *y);
-float q_diff_mag_original(const float *x, const float *y); // Original algorithm for comparison
 bool q_epsilon(const float *x, const float *y, float eps);
 
 void q_fem(const float *q, float *out);
