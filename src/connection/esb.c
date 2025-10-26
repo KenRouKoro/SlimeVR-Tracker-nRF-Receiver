@@ -83,17 +83,17 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 	uint8_t diff_forward = (received_seq - last_seq) & 0xFF;  // 向前差值
 	uint8_t diff_backward = (last_seq - received_seq) & 0xFF; // 向后差值
 
-	// 如果是向前的小跳跃（1-16），可能是丢包
-	if (diff_forward <= 16) {
-		LOG_DBG("Possible packet loss for tracker %d: last=%d, received=%d, gap=%d",
+	// 如果是向前的小跳跃（1-32），可能是丢包
+	if (diff_forward <= 32) {
+		LOG_WRN("Possible packet loss for tracker %d: last=%d, received=%d, gap=%d",
 				tracker_id, last_seq, received_seq, diff_forward - 1);
 		last_packet_sequence[tracker_id] = received_seq;
 		packet_count[tracker_id]++;
 		return 1;
 	}
 
-	// 如果是向后的小差值（1-5），可能是重复或乱序
-	if (diff_backward <= 5) {
+	// 如果是向后的小差值（1-16），可能是重复或乱序
+	if (diff_backward <= 16) {
 		LOG_WRN("Duplicate or out-of-order packet for tracker %d: last=%d, received=%d",
 				tracker_id, last_seq, received_seq);
 		// 不更新last_packet_sequence，因为这可能是旧包
@@ -202,6 +202,33 @@ void event_handler(struct esb_evt const *event)
 					}
 					if (rx_payload.data[0] > 223) // reserved for receiver only
 						break;
+					hid_write_packet_n(rx_payload.data, rx_payload.rssi); // write to hid endpoint
+				}
+				break;
+			case 17: // 16 bytes data + 1 byte sequence number
+				{
+					uint8_t imu_id = rx_payload.data[1];
+					if (imu_id >= stored_trackers) // not a stored tracker
+						return;
+					if (discovered_trackers[imu_id] < DETECTION_THRESHOLD) // garbage filtering of nonexistent tracker
+					{
+						discovered_trackers[imu_id]++;
+						return;
+					}
+					if (rx_payload.data[0] > 223) // reserved for receiver only
+						break;
+
+					uint8_t received_sequence = rx_payload.data[16];
+					int seq_result = check_packet_sequence(imu_id, received_sequence);
+
+					// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启
+					if (seq_result == 2) {
+						// 乱序包，丢弃不转发
+						LOG_WRN("Discarding out-of-order packet for tracker %d", imu_id);
+						break;
+					}
+
+					// 其他情况（正常、丢包、重启）都转发数据包
 					hid_write_packet_n(rx_payload.data, rx_payload.rssi); // write to hid endpoint
 				}
 				break;
