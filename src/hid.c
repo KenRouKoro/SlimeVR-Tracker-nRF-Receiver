@@ -46,6 +46,7 @@ static ATOMIC_DEFINE(hid_ep_in_busy, 1);
 
 #define HID_EP_BUSY_FLAG	0
 #define REPORT_PERIOD		K_MSEC(1) // streaming reports
+#define HID_EP_REPORT_COUNT 4
 
 struct tracker_report ep_report_buffer[HID_EP_REPORT_COUNT];
 
@@ -76,6 +77,9 @@ static void packet_device_addr(uint8_t *report, uint16_t id) // associate id and
 	memcpy(&report[2], &stored_tracker_addr[id], 6);
 	memset(&report[8], 0, 8); // last 8 bytes unused for now
 }
+
+static uint32_t dropped_reports = 0;
+static uint16_t max_dropped_reports = 0;
 
 static void send_report(struct k_work *work)
 {
@@ -133,6 +137,20 @@ static void send_report(struct k_work *work)
 		//LOG_DBG("HID IN endpoint busy");
 	}
 }
+
+#define DROPPED_REPORT_LOG_INTERVAL 5000
+
+static void hid_dropped_reports_logging(void)
+{
+	while (1) {
+		if (dropped_reports) LOG_INF("Dropped reports: %u (max: %u)", dropped_reports, max_dropped_reports);
+		dropped_reports = 0;
+		max_dropped_reports = 0;
+		k_msleep(DROPPED_REPORT_LOG_INTERVAL);
+	}
+}
+
+K_THREAD_DEFINE(hid_dropped_reports_logging_thread, 256, hid_dropped_reports_logging, NULL, NULL, NULL, 6, 0, 0);
 
 static void int_in_ready_cb(const struct device *dev)
 {
@@ -240,95 +258,11 @@ K_THREAD_DEFINE(usb_init_thread_id, 256, usb_init_thread, NULL, NULL, NULL, 6, 0
 //|4       |id      |q0               |q1               |q2               |q3               |m0               |m1               |m2               |
 //|255     |id      |addr                                                 |resv                                                                   |
 
-#ifndef CONFIG_SOC_NRF52820
-#include "util.h"
-// last valid data
-static float last_q_trackers[MAX_TRACKERS][4] = {0};
-static uint32_t last_v_trackers[MAX_TRACKERS] = {0};
-static uint8_t last_p_trackers[MAX_TRACKERS] = {0};
-static int last_valid_trackers[MAX_TRACKERS] = {0};
-// last received data
-static float cur_q_trackers[MAX_TRACKERS][4] = {0};
-static uint32_t cur_v_trackers[MAX_TRACKERS] = {0};
-static uint8_t cur_p_trackers[MAX_TRACKERS] = {0};
-#endif
-
 void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 {
-#ifndef CONFIG_SOC_NRF52820
-	// discard packets with abnormal rotation // TODO:
-	if (data[0] == 1 || data[0] == 2 || data[0] == 4)
-	{
-		float v[3] = {0};
-		float q[4] = {0};
-		int16_t *buf = (int16_t *)&data[2];
-		uint32_t *q_buf = (uint32_t *)&data[5];
-		if (data[0] == 1 || data[0] == 4)
-		{
-			q[0] = FIXED_15_TO_DOUBLE(buf[3]);
-			q[1] = FIXED_15_TO_DOUBLE(buf[0]);
-			q[2] = FIXED_15_TO_DOUBLE(buf[1]);
-			q[3] = FIXED_15_TO_DOUBLE(buf[2]);
-		}
-		else
-		{
-			v[0] = FIXED_10_TO_DOUBLE(*q_buf & 1023);
-			v[1] = FIXED_11_TO_DOUBLE((*q_buf >> 10) & 2047);
-			v[2] = FIXED_11_TO_DOUBLE((*q_buf >> 21) & 2047);
-			for (int i = 0; i < 3; i++)
-				v[i] = v[i] * 2 - 1;
-			q_iem(v, q);
-		}
-		float *last_q = last_q_trackers[data[1]];
-		uint32_t *last_v = &last_v_trackers[data[1]];
-		uint8_t *last_p = &last_p_trackers[data[1]];
-		float *cur_q = cur_q_trackers[data[1]];
-		uint32_t *cur_v = &cur_v_trackers[data[1]];
-		uint8_t *cur_p = &cur_p_trackers[data[1]];
-		float mag = q_diff_mag(q, last_q); // difference between last valid
-		float mag_cur = q_diff_mag(q, cur_q); // difference between last received
-		bool mag_invalid = mag > 0.5f && mag < 6.28f - 0.5f; // possibly invalid rotation
-		bool mag_cur_invalid = mag_cur > 0.5f && mag_cur < 6.28f - 0.5f; // possibly inconsistent rotation
-		if (mag_invalid)
-		{
-			// HWID, ID, packet type, rotation difference (rad), last valid packet
-			LOG_ERR("Abnormal rot. %012llX i%d p%d m%.2f/%.2f v%d", stored_tracker_addr[data[1]], data[1], data[0], (double)mag, (double)mag_cur, last_valid_trackers[data[1]]);
-			// decoded quat, packet type, q_buf
-			printk("a: %5.2f %5.2f %5.2f %5.2f p%d:%08X\n", (double)q[0], (double)q[1], (double)q[2], (double)q[3], data[0], *q_buf);
-			printk("b: %5.2f %5.2f %5.2f %5.2f p%d:%08X\n", (double)cur_q[0], (double)cur_q[1], (double)cur_q[2], (double)cur_q[3], *cur_p, *cur_v);
-			printk("c: %5.2f %5.2f %5.2f %5.2f p%d:%08X\n", (double)last_q[0], (double)last_q[1], (double)last_q[2], (double)last_q[3], *last_p, *last_v);
-			last_valid_trackers[data[1]]++;
-			memcpy(cur_q, q, sizeof(q));
-			*cur_v = *q_buf;
-			*cur_p = data[0];
-			if (!mag_cur_invalid && last_valid_trackers[data[1]] > 2) // reset last_q
-			{
-				LOG_WRN("Reset rotation for %012llX, ID %d", stored_tracker_addr[data[1]], data[1]);
-				last_valid_trackers[data[1]] = 0;
-				memcpy(last_q, q, sizeof(q));
-				*last_v = *q_buf;
-				*last_p = data[0];
-				return;
-			}
-			return;
-		}
-		last_valid_trackers[data[1]] = 0;
-		memcpy(cur_q, q, sizeof(q));
-		*cur_v = *q_buf;
-		*cur_p = data[0];
-		memcpy(last_q, q, sizeof(q));
-		*last_v = *q_buf;
-		*last_p = data[0];
-	}
-#endif
-
-	// Copy data to report structure
-	memcpy(&report.data, data, sizeof(report));
-
-	// Add RSSI for packets that have room (not full precision quaternion packets)
-	if (packet_type != PACKET_TYPE_ROTATION && packet_type != PACKET_TYPE_FULL_MAG) {
+	memcpy(&report.data, data, sizeof(report)); // all data can be passed through
+	if (data[0] != 1 && data[0] != 4) // packet 1 and 4 are full precision quat and accel/mag, no room for rssi
 		report.data[15] = rssi;
-	}
 	// Get current FIFO status atomically
 	size_t write_idx = (size_t)atomic_get(&report_write_index);
 	size_t read_idx = (size_t)atomic_get(&report_read_index);
@@ -349,8 +283,10 @@ void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 			if (check_index == MAX_TRACKERS) check_index = 0;
 		}
 	}
-	if (write_idx + 1 == read_idx || (write_idx == MAX_TRACKERS-1 && read_idx == 0)) // overflow
+	if (write_idx + 1 == read_idx || (write_idx == MAX_TRACKERS-1 && read_idx == 0)) { // overflow
+		dropped_reports ++;
 		return;
+	}
 	// Write new packet into FIFO
 	reports[write_idx] = report;
 
