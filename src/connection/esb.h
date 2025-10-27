@@ -40,6 +40,8 @@ void esb_start_pairing(void);
 void esb_reset_pair(void);
 void esb_finish_pair(void);
 void esb_clear(void);
+void esb_reset_tracker_sequence(uint8_t tracker_id);
+void esb_print_all_stats(void);
 void esb_write_sync(uint16_t led_clock);
 void esb_receive(void);
 
