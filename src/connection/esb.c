@@ -50,7 +50,7 @@ static uint8_t packet_count[MAX_TRACKERS] = {0}; // 每个追踪器接收到的�
 
 // 丢包统计结构
 struct packet_stats {
-	uint32_t total_received;      // 实际接收到的包数
+	uint32_t total_received;      // 实际接收到的包数（不包括重复包）
 	uint32_t normal_packets;      // 正常按序的包数
 	uint32_t gap_events;          // 跳跃事件数（可能是丢包）
 	uint32_t out_of_order;        // 乱序包数
@@ -58,7 +58,6 @@ struct packet_stats {
 	uint32_t restart_events;      // 重启事件数
 	uint32_t total_gaps;          // 总跳跃数（估计丢包数）
 	uint32_t last_sequence;       // 最后一个正常序列号
-	uint32_t same_seq_count;      // 相同序号连续出现次数
 	uint64_t last_packet_time;    // 最后一个包的时间戳
 	bool first_packet;            // 是否是第一个包
 	// TPS 计算相关
@@ -69,7 +68,6 @@ struct packet_stats {
 
 static struct packet_stats tracker_stats[MAX_TRACKERS] = {0};
 #define STATS_PRINT_INTERVAL_MS 5000  // 每5秒打印一次统计
-#define MAX_SAME_SEQ_TOLERANCE 10     // 同一序号最多允许连续出现次数
 #define TPS_CALCULATION_INTERVAL_MS 1000  // 每秒计算一次TPS
 
 // 统计线程相关
@@ -143,26 +141,10 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 	uint8_t diff_forward = (received_seq - last_seq) & 0xFF;  // 向前差值
 	uint8_t diff_backward = (last_seq - received_seq) & 0xFF; // 向后差值
 
-	// // 特殊处理：如果接收到序号0，可能是追踪器重启或序号重置
-	// if (received_seq == 0) {
-	// 	// 更新接收包计数
-	// 	stats->total_received++;
-	// 	stats->restart_events++;
-	// 	// 重置该追踪器的状态
-	// 	last_packet_sequence[tracker_id] = received_seq;
-	// 	packet_count[tracker_id] = 1;
-	// 	stats->last_sequence = received_seq;
-	// 	LOG_WRN("Sequence reset: tracker=%d, seq=%d", tracker_id, received_seq);
-	// 	return 3; // 视为重启事件
-	// }
-
 	if (diff_forward == 0) {
-		// 相同序号 - 这可能是追踪器序号管理问题，而不是真正的重复包
-		// 根据调试日志，追踪器确实在重复发送相同序号的有效数据
-		// 将这些包视为有效数据，而不是重复包
-		stats->total_received++;
-		stats->same_seq_count++;
-		return 4;
+		// 相同序号 - 这是真正的重复包
+		stats->duplicate_packets++;
+		return 4; // 重复包
 	}
 
 	// 如果是向前的跳跃（1-128），可能是丢包
@@ -232,7 +214,7 @@ static void print_tracker_stats(uint8_t tracker_id)
 		estimated_loss_rate = ((float)stats->total_gaps / estimated_sent) * 100.0f;
 	}
 
-	LOG_INF("Tracker %d: Recv=%u(+%u dup), Normal=%u, EstLoss=%.1f%% (%u gaps), Dup=%.1f%%, OOO=%.1f%%, Restart=%u, SameSeq=%u, TPS=%u",
+	LOG_INF("Tracker %d: Recv=%u(+%u dup), Normal=%u, EstLoss=%.1f%% (%u gaps), Dup=%.1f%%, OOO=%.1f%%, Restart=%u, TPS=%u",
 			tracker_id,
 			stats->total_received, stats->duplicate_packets,
 			stats->normal_packets,
@@ -240,7 +222,6 @@ static void print_tracker_stats(uint8_t tracker_id)
 			(double)duplicate_rate,
 			(double)out_of_order_rate,
 			stats->restart_events,
-			stats->same_seq_count,
 			stats->current_tps);
 }
 
@@ -785,6 +766,16 @@ void esb_print_all_stats(void)
 		}
 	}
 	LOG_INF("================================");
+}
+
+// 重置所有追踪器的统计信息
+void esb_reset_all_stats(void)
+{
+	for (int i = 0; i < MAX_TRACKERS; i++)
+	{
+		memset(&tracker_stats[i], 0, sizeof(struct packet_stats));
+	}
+	LOG_INF("All packet statistics have been reset");
 }
 
 // TODO:

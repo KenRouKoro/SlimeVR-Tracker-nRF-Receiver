@@ -177,6 +177,8 @@ static void console_thread(void)
 	printk("pair                         Enter pairing mode\n");
 	printk("exit                         Exit pairing mode\n");
 	printk("clear                        Clear stored devices\n");
+	printk("stats                        Show packet statistics\n");
+	printk("resetstats                   Reset packet statistics\n");
 
 	uint8_t command_info[] = "info";
 	uint8_t command_uptime[] = "uptime";
@@ -187,6 +189,8 @@ static void console_thread(void)
 	uint8_t command_pair[] = "pair";
 	uint8_t command_exit[] = "exit";
 	uint8_t command_clear[] = "clear";
+	uint8_t command_stats[] = "stats";
+	uint8_t command_resetstats[] = "resetstats";
 
 #if DFU_EXISTS
 	printk("dfu                          Enter DFU bootloader\n");
@@ -256,6 +260,14 @@ static void console_thread(void)
 		else if (memcmp(line, command_clear, sizeof(command_clear)) == 0) 
 		{
 			esb_clear();
+		}
+		else if (memcmp(line, command_stats, sizeof(command_stats)) == 0) 
+		{
+			esb_print_all_stats();
+		}
+		else if (memcmp(line, command_resetstats, sizeof(command_resetstats)) == 0) 
+		{
+			esb_reset_all_stats();
 		}
 #if DFU_EXISTS
 		else if (memcmp(line, command_dfu, sizeof(command_dfu)) == 0)
