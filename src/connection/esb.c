@@ -264,6 +264,9 @@ void event_handler(struct esb_evt const *event)
 		{
 			switch (rx_payload.length)
 			{
+			case 1:
+			  // Heartbeat packet
+				break;
 			case 8:
 				LOG_DBG("rx: %16llX", *(uint64_t *)rx_payload.data);
 				memcpy(pairing_buf, rx_payload.data, 8);
