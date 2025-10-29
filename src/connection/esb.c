@@ -898,6 +898,9 @@ void esb_clear(void)
 		memset(&tracker_stats[i], 0, sizeof(struct packet_stats));
 	}
 	LOG_INF("Packet sequence state and statistics reset for all trackers");
+
+	// 重置所有tracker的RSSI平滑状态
+	hid_reset_all_rssi_smooth();
 }
 
 // 重置特定追踪器的包序号状态
@@ -910,6 +913,8 @@ void esb_reset_tracker_sequence(uint8_t tracker_id)
 		discovered_trackers[tracker_id] = 0;
 		// 重置统计信息
 		memset(&tracker_stats[tracker_id], 0, sizeof(struct packet_stats));
+		// 重置RSSI平滑状态
+		hid_reset_rssi_smooth(tracker_id);
 		LOG_INF("Packet sequence state and statistics reset for tracker %d", tracker_id);
 	}
 }

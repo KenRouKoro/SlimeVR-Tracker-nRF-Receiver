@@ -52,7 +52,21 @@ static ATOMIC_DEFINE(hid_ep_in_busy, 1);
 #define HID_TPS_UPDATE_INTERVAL_MS 1000
 #define HID_STATS_POLL_INTERVAL_MS 200
 
+// EMA平滑因子配置
+// alpha = RSSI_EMA_ALPHA / 256
+// alpha = 0.2 (51/256 ≈ 0.199) - 相当于约10个样本的简单移动平均
+// alpha越小，平滑效果越强但响应越慢
+#define RSSI_EMA_ALPHA 51  // 范围: 1-255, 推荐值: 26-77 (0.1-0.3)
+
 struct tracker_report ep_report_buffer[HID_EP_REPORT_COUNT];
+
+// RSSI EMA平滑处理结构
+struct rssi_ema_state {
+	int16_t ema_value;    // EMA值，使用int16避免溢出（实际值 * 256）
+	bool initialized;     // 是否已初始化
+};
+
+static struct rssi_ema_state rssi_states[MAX_TRACKERS] = {0};
 
 struct hid_stats_state {
 	uint32_t reports_in_interval;
@@ -260,6 +274,54 @@ uint32_t hid_get_current_tps(void)
 	return hid_stats_snapshot(NULL);
 }
 
+// RSSI指数加权移动平均滤波函数
+// 使用EMA算法: EMA(n) = alpha * X(n) + (1 - alpha) * EMA(n-1)
+// 为避免浮点运算，使用定点数: alpha = RSSI_EMA_ALPHA / 256
+static uint8_t rssi_smooth_update(uint8_t tracker_id, int8_t new_rssi)
+{
+	if (tracker_id >= MAX_TRACKERS) {
+		return (uint8_t)new_rssi;  // 超出范围，返回原始值
+	}
+
+	struct rssi_ema_state *state = &rssi_states[tracker_id];
+
+	// 首次初始化，直接使用当前值
+	if (!state->initialized) {
+		state->ema_value = (int16_t)new_rssi << 8;  // 左移8位作为定点数
+		state->initialized = true;
+		return (uint8_t)new_rssi;
+	}
+
+	// EMA计算: EMA = alpha * new + (1 - alpha) * old_EMA
+	// 定点数实现: EMA = (alpha * new * 256 + (256 - alpha) * old_EMA) / 256
+	int32_t new_scaled = (int32_t)new_rssi << 8;  // new * 256
+	int32_t alpha_term = (int32_t)RSSI_EMA_ALPHA * new_scaled;  // alpha * new * 256
+	int32_t beta_term = (256 - RSSI_EMA_ALPHA) * state->ema_value;  // (1-alpha) * old_EMA
+
+	state->ema_value = (int16_t)((alpha_term + beta_term) >> 8);  // 除以256
+
+	// 返回EMA值（右移8位还原）
+	int8_t result = (int8_t)(state->ema_value >> 8);
+	return (uint8_t)result;
+}
+
+// 重置特定tracker的RSSI平滑状态
+void hid_reset_rssi_smooth(uint8_t tracker_id)
+{
+	if (tracker_id < MAX_TRACKERS) {
+		rssi_states[tracker_id].initialized = false;
+		rssi_states[tracker_id].ema_value = 0;
+	}
+}
+
+// 重置所有tracker的RSSI平滑状态
+void hid_reset_all_rssi_smooth(void)
+{
+	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+		hid_reset_rssi_smooth(i);
+	}
+}
+
 K_THREAD_DEFINE(hid_dropped_reports_logging_thread, 256, hid_dropped_reports_logging, NULL, NULL, NULL, 6, 0, 0);
 
 static void int_in_ready_cb(const struct device *dev)
@@ -371,8 +433,14 @@ K_THREAD_DEFINE(usb_init_thread_id, 256, usb_init_thread, NULL, NULL, NULL, 6, 0
 void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 {
 	memcpy(&report.data, data, sizeof(report)); // all data can be passed through
-	if (data[0] != 1 && data[0] != 4) // packet 1 and 4 are full precision quat and accel/mag, no room for rssi
-		report.data[15] = rssi;
+
+	if (data[0] != 1 && data[0] != 4) { // packet 1 and 4 are full precision quat and accel/mag, no room for rssi
+		uint8_t tracker_id = data[1];
+		// 对RSSI值进行平滑处理
+		uint8_t smoothed_rssi = rssi_smooth_update(tracker_id, (int8_t)rssi);
+		report.data[15] = smoothed_rssi;
+	}
+
 	// Get current FIFO status atomically
 	size_t write_idx = (size_t)atomic_get(&report_write_index);
 	size_t read_idx = (size_t)atomic_get(&report_read_index);

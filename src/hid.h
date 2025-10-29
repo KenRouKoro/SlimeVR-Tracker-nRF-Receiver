@@ -27,5 +27,7 @@
 
 void hid_write_packet_n(uint8_t* data, uint8_t rssi);
 uint32_t hid_get_current_tps(void);
+void hid_reset_rssi_smooth(uint8_t tracker_id);
+void hid_reset_all_rssi_smooth(void);
 
 #endif
