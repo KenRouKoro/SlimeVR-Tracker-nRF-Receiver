@@ -21,7 +21,9 @@
 	THE SOFTWARE.
 */
 #include "globals.h"
+#include "hid.h"
 
+#include <limits.h>
 #include <zephyr/kernel.h>
 #include <zephyr/usb/usb_device.h>
 #include <zephyr/usb/class/usb_hid.h>
@@ -47,8 +49,21 @@ static ATOMIC_DEFINE(hid_ep_in_busy, 1);
 #define HID_EP_BUSY_FLAG	0
 #define REPORT_PERIOD		K_MSEC(1) // streaming reports
 #define HID_EP_REPORT_COUNT 4
+#define HID_TPS_UPDATE_INTERVAL_MS 1000
+#define HID_STATS_POLL_INTERVAL_MS 200
 
 struct tracker_report ep_report_buffer[HID_EP_REPORT_COUNT];
+
+struct hid_stats_state {
+	uint32_t reports_in_interval;
+	uint32_t current_tps;
+	int64_t last_tps_time;
+	int64_t last_report_time;
+	bool had_activity;
+};
+
+static struct hid_stats_state hid_stats;
+static K_MUTEX_DEFINE(hid_stats_lock);
 
 LOG_MODULE_REGISTER(hid_event, LOG_LEVEL_INF);
 
@@ -76,6 +91,69 @@ static void packet_device_addr(uint8_t *report, uint16_t id) // associate id and
 	report[1] = id;
 	memcpy(&report[2], &stored_tracker_addr[id], 6);
 	memset(&report[8], 0, 8); // last 8 bytes unused for now
+}
+
+static void hid_stats_record_reports(uint32_t reports)
+{
+	if (reports == 0U)
+		return;
+
+	int64_t now = k_uptime_get();
+
+	k_mutex_lock(&hid_stats_lock, K_FOREVER);
+
+	if (hid_stats.last_tps_time == 0)
+		hid_stats.last_tps_time = now;
+
+	hid_stats.reports_in_interval += reports;
+	hid_stats.last_report_time = now;
+	hid_stats.had_activity = true;
+
+	if (now - hid_stats.last_tps_time >= HID_TPS_UPDATE_INTERVAL_MS) {
+		hid_stats.current_tps = hid_stats.reports_in_interval;
+		hid_stats.reports_in_interval = 0;
+		hid_stats.last_tps_time = now;
+	}
+
+	k_mutex_unlock(&hid_stats_lock);
+}
+
+static void hid_stats_update_idle_if_needed(int64_t now)
+{
+	k_mutex_lock(&hid_stats_lock, K_FOREVER);
+
+	if (hid_stats.last_tps_time == 0) {
+		k_mutex_unlock(&hid_stats_lock);
+		return;
+	}
+
+	if (now - hid_stats.last_tps_time >= HID_TPS_UPDATE_INTERVAL_MS) {
+		if (hid_stats.reports_in_interval > 0U) {
+			hid_stats.current_tps = hid_stats.reports_in_interval;
+			hid_stats.reports_in_interval = 0;
+		} else if (hid_stats.last_report_time &&
+			   now - hid_stats.last_report_time >= HID_TPS_UPDATE_INTERVAL_MS) {
+			hid_stats.current_tps = 0;
+		}
+		hid_stats.last_tps_time = now;
+	}
+
+	k_mutex_unlock(&hid_stats_lock);
+}
+
+static uint32_t hid_stats_snapshot(bool *had_activity)
+{
+	uint32_t current_tps;
+
+	k_mutex_lock(&hid_stats_lock, K_FOREVER);
+	current_tps = hid_stats.current_tps;
+	if (had_activity) {
+		*had_activity = hid_stats.had_activity;
+		hid_stats.had_activity = false;
+	}
+	k_mutex_unlock(&hid_stats_lock);
+
+	return current_tps;
 }
 
 static uint32_t dropped_reports = 0;
@@ -108,10 +186,15 @@ static void send_report(struct k_work *work)
 		// Copy existing data to buffer
 		for (epind = 0; epind < reports_to_send; epind++) {
 			ep_report_buffer[epind] = reports[read_idx];
-			epind++;
 			read_idx++;
-			if (read_idx == MAX_TRACKERS) read_idx = 0;
+			if (read_idx == MAX_TRACKERS) {
+				read_idx = 0;
+			}
+		}
+
+		if (reports_to_send > 0U) {
 			atomic_set(&report_read_index, read_idx);
+			hid_stats_record_reports((uint32_t)reports_to_send);
 		}
 
 		// Pad remaining report slots with device addr
@@ -142,12 +225,39 @@ static void send_report(struct k_work *work)
 
 static void hid_dropped_reports_logging(void)
 {
+	uint32_t last_logged_tps = UINT32_MAX;
+	int64_t last_log_time = k_uptime_get();
+
 	while (1) {
-		if (dropped_reports) LOG_INF("Dropped reports: %u (max: %u)", dropped_reports, max_dropped_reports);
-		dropped_reports = 0;
-		max_dropped_reports = 0;
-		k_msleep(DROPPED_REPORT_LOG_INTERVAL);
+		k_msleep(HID_STATS_POLL_INTERVAL_MS);
+
+		int64_t now = k_uptime_get();
+		hid_stats_update_idle_if_needed(now);
+
+		if (now - last_log_time >= DROPPED_REPORT_LOG_INTERVAL) {
+			bool had_activity = false;
+			uint32_t current_tps = hid_stats_snapshot(&had_activity);
+
+			if (dropped_reports)
+				LOG_INF("Dropped reports: %u (max: %u)", dropped_reports, max_dropped_reports);
+			dropped_reports = 0;
+			max_dropped_reports = 0;
+
+			if (had_activity && current_tps != last_logged_tps) {
+				LOG_INF("HID TPS: %u", current_tps);
+				last_logged_tps = current_tps;
+			} else if (!had_activity) {
+				last_logged_tps = UINT32_MAX;
+			}
+
+			last_log_time = now;
+		}
 	}
+}
+
+uint32_t hid_get_current_tps(void)
+{
+	return hid_stats_snapshot(NULL);
 }
 
 K_THREAD_DEFINE(hid_dropped_reports_logging_thread, 256, hid_dropped_reports_logging, NULL, NULL, NULL, 6, 0, 0);

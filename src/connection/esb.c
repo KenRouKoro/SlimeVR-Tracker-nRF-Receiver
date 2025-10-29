@@ -82,6 +82,7 @@ struct packet_stats {
 static struct packet_stats tracker_stats[MAX_TRACKERS] = {0};
 #define STATS_PRINT_INTERVAL_MS 5000  // 每5秒打印一次统计
 #define TPS_CALCULATION_INTERVAL_MS 1000  // 每秒计算一次TPS
+#define TPS_MONITOR_INTERVAL_MS 250
 
 // 统计线程相关
 static void esb_stats_thread(void);
@@ -241,21 +242,44 @@ static void print_tracker_stats(uint8_t tracker_id)
 // 统计线程 - 定期打印统计信息
 static void esb_stats_thread(void)
 {
-	while (1) {
-		k_msleep(STATS_PRINT_INTERVAL_MS);
+	int64_t last_log_time = k_uptime_get();
 
-		bool has_data = false;
+	while (1) {
+		k_msleep(TPS_MONITOR_INTERVAL_MS);
+
+		uint64_t now = (uint64_t)k_uptime_get();
 		for (int i = 0; i < MAX_TRACKERS; i++) {
-			if (tracker_stats[i].total_received > 0) {
-				if (!has_data) {
-					LOG_INF("=== Packet Statistics ===");
-					has_data = true;
+			struct packet_stats *stats = &tracker_stats[i];
+			if (stats->last_tps_time == 0) {
+				continue;
+			}
+			if (now - stats->last_tps_time >= TPS_CALCULATION_INTERVAL_MS) {
+				if (stats->packets_in_last_second > 0) {
+					stats->current_tps = stats->packets_in_last_second;
+				} else if (stats->last_packet_time &&
+					   now - stats->last_packet_time >= TPS_CALCULATION_INTERVAL_MS) {
+					stats->current_tps = 0;
 				}
-				print_tracker_stats(i);
+				stats->packets_in_last_second = 0;
+				stats->last_tps_time = now;
 			}
 		}
-		if (has_data) {
-			LOG_INF("========================");
+
+		if (now - last_log_time >= STATS_PRINT_INTERVAL_MS) {
+			bool has_data = false;
+			for (int i = 0; i < MAX_TRACKERS; i++) {
+				if (tracker_stats[i].total_received > 0) {
+					if (!has_data) {
+						LOG_INF("=== Packet Statistics ===");
+						has_data = true;
+					}
+					print_tracker_stats(i);
+				}
+			}
+			if (has_data) {
+				LOG_INF("========================");
+			}
+			last_log_time = now;
 		}
 	}
 }
