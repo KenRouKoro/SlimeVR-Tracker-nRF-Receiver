@@ -35,6 +35,7 @@
 
 #include <ctype.h>
 #include <stdlib.h>
+#include <errno.h>
 
 #define DFU_DBL_RESET_MEM 0x20007F7C
 #define DFU_DBL_RESET_APP 0x4ee5677e
@@ -232,9 +233,29 @@ static void console_thread(void)
 			uint8_t buf[13];
 			snprintk(buf, 13, "%012llx", addr);
 			if (addr != 0 && memcmp(buf, arg, 13) == 0)
-				esb_add_pair(addr, true);
+			{
+				int slot = esb_add_pair(addr, true);
+				if (slot >= 0)
+				{
+					printk("Tracker stored in slot %d\n", slot);
+				}
+				else if (slot == -ENOSPC)
+				{
+					printk("Tracker list is full\n");
+				}
+				else if (slot == -EINVAL)
+				{
+					printk("Invalid tracker address\n");
+				}
+				else
+				{
+					printk("Failed to add tracker: %d\n", slot);
+				}
+			}
 			else
+			{
 				printk("Invalid address\n");
+			}
 		}
 		else if (memcmp(line, command_remove, sizeof(command_remove)) == 0)
 		{
@@ -257,15 +278,15 @@ static void console_thread(void)
 		{
 			esb_finish_pair();
 		}
-		else if (memcmp(line, command_clear, sizeof(command_clear)) == 0) 
+		else if (memcmp(line, command_clear, sizeof(command_clear)) == 0)
 		{
 			esb_clear();
 		}
-		else if (memcmp(line, command_stats, sizeof(command_stats)) == 0) 
+		else if (memcmp(line, command_stats, sizeof(command_stats)) == 0)
 		{
 			esb_print_all_stats();
 		}
-		else if (memcmp(line, command_resetstats, sizeof(command_resetstats)) == 0) 
+		else if (memcmp(line, command_resetstats, sizeof(command_resetstats)) == 0)
 		{
 			esb_reset_all_stats();
 		}
@@ -281,7 +302,7 @@ static void console_thread(void)
 #endif
 		}
 #endif
-		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) 
+		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0)
 		{
 			print_meow();
 		}

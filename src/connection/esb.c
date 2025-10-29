@@ -25,7 +25,12 @@
 #include "hid.h"
 
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <errno.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
+#include <zephyr/kernel.h>
 #include <zephyr/sys/crc.h>
 
 #include "esb.h"
@@ -43,7 +48,15 @@ static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0,
 static struct esb_payload tx_payload_sync = ESB_CREATE_PAYLOAD(0,
 														  0, 0, 0, 0);
 
-uint8_t pairing_buf[8] = {0};
+struct pairing_event {
+	uint8_t packet[8];
+};
+
+// Queue pairing packets from the ISR context to the pairing worker thread.
+K_MSGQ_DEFINE(esb_pairing_msgq, sizeof(struct pairing_event), 8, 4);
+
+static K_MUTEX_DEFINE(tracker_store_lock);
+
 static uint8_t discovered_trackers[MAX_TRACKERS] = {0};
 static uint8_t last_packet_sequence[MAX_TRACKERS]; // 追踪每个追踪器的最后一个包序号
 static uint8_t packet_count[MAX_TRACKERS] = {0}; // 每个追踪器接收到的包计数
@@ -80,9 +93,9 @@ static void esb_packet_filter_thread(void);
 K_THREAD_DEFINE(esb_packet_filter_thread_id, 256, esb_packet_filter_thread, NULL, NULL, NULL, 6, 0, 0);
 
 static void esb_thread(void);
-K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 5, 0, 0);
 
-static void esb_parse_pair(void);
+static bool esb_parse_pair(const uint8_t packet[8]);
 
 static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 {
@@ -268,9 +281,24 @@ void event_handler(struct esb_evt const *event)
 			  // Heartbeat packet
 				break;
 			case 8:
-				LOG_DBG("rx: %16llX", *(uint64_t *)rx_payload.data);
-				memcpy(pairing_buf, rx_payload.data, 8);
-				switch (pairing_buf[1])
+			{
+				struct pairing_event evt = {0};
+				memcpy(evt.packet, rx_payload.data, sizeof(evt.packet));
+				LOG_DBG("rx: %16llX", *(uint64_t *)evt.packet);
+				int q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
+				if (q_err)
+				{
+					struct pairing_event discarded;
+					if (k_msgq_get(&esb_pairing_msgq, &discarded, K_NO_WAIT) == 0)
+					{
+						q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
+					}
+					if (q_err)
+					{
+						LOG_WRN("Pairing queue full, dropping packet type %u", evt.packet[1]);
+					}
+				}
+				switch (evt.packet[1])
 				{
 				case 1: // receives ack generated from last packet
 					LOG_DBG("RX Pairing Sent ACK");
@@ -278,11 +306,15 @@ void event_handler(struct esb_evt const *event)
 				case 2: // should "acknowledge" pairing data sent from receiver
 					LOG_DBG("RX Pairing ACK Receiver");
 					break;
-				default: // first packet in pairing burst
+				case 0:
 					LOG_INF("RX Pairing Request");
+					break;
+				default:
+					LOG_WRN("Unexpected pairing packet type %u", evt.packet[1]);
 					break;
 				}
 				break;
+			}
 			case 21: // 16 bytes data + 4 bytes CRC32 + 1 byte sequence number
 				{
 					uint32_t crc_check = crc32_k_4_2_update(0x93a409eb, rx_payload.data, 16);
@@ -462,8 +494,7 @@ int esb_initialize(bool tx)
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
 
-	// Add jitter to retransmit delay to avoid collisions
-	uint16_t jitter = (rand() % 400) - 200;  // ±200 µs
+	uint16_t jitter = (rand() % 200) - 100;  // ±100 µs
 	uint16_t retransmit_delay_with_jitter = RADIO_RETRANSMIT_DELAY + jitter;
 
 	if (tx)
@@ -475,7 +506,7 @@ int esb_initialize(bool tx)
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = 30;
 		config.retransmit_delay = retransmit_delay_with_jitter;
-		config.retransmit_count = 0;
+		// config.retransmit_count = 0;
 		config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
@@ -575,53 +606,88 @@ inline void esb_set_addr_paired(void)
 static bool esb_pairing = false;
 static bool esb_paired = false;
 
-void esb_add_pair(uint64_t addr, bool checksum)
+int esb_add_pair(uint64_t addr, bool checksum)
 {
-	int id = stored_trackers;
-	if (checksum)
+	if (addr == 0)
+		return -EINVAL;
+
+	bool new_entry = false;
+	int assigned_id = -1;
+
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	for (int i = 0; i < stored_trackers; i++)
 	{
-		for (int i = 0; i < stored_trackers; i++) // Check if the device is already stored
+		if (stored_tracker_addr[i] == addr)
 		{
-			if (addr != 0 && stored_tracker_addr[i] == addr)
-			{
-				id = i;
-			}
+			assigned_id = i;
+			break;
 		}
 	}
-	if (id == stored_trackers)
+
+	if (assigned_id < 0)
 	{
-		LOG_INF("Added device on id %d with address %012llX", id, addr);
-		stored_tracker_addr[id] = addr;
-		sys_write(STORED_ADDR_0 + id, NULL, &stored_tracker_addr[id], sizeof(stored_tracker_addr[0]));
+		if (stored_trackers >= MAX_TRACKERS)
+		{
+			k_mutex_unlock(&tracker_store_lock);
+			LOG_WRN("Tracker storage full, cannot add %012llX", addr);
+			return -ENOSPC;
+		}
+		assigned_id = stored_trackers;
+		stored_tracker_addr[assigned_id] = addr;
 		stored_trackers++;
+		new_entry = true;
+	}
+
+	k_mutex_unlock(&tracker_store_lock);
+
+	if (new_entry)
+	{
+		LOG_INF("Added device on id %d with address %012llX", assigned_id, addr);
+		sys_write(STORED_ADDR_0 + assigned_id, NULL, &stored_tracker_addr[assigned_id], sizeof(stored_tracker_addr[0]));
 		sys_write(STORED_TRACKERS, NULL, &stored_trackers, sizeof(stored_trackers));
 	}
 	else
 	{
-		LOG_INF("Device already stored with id %d", id);
+		LOG_INF("Device already stored with id %d", assigned_id);
 	}
+
 	if (checksum)
 	{
 		uint8_t buf[6] = {0};
 		memcpy(buf, &addr, 6);
-		uint8_t checksum = crc8_ccitt(0x07, buf, 6);
-		if (checksum == 0)
-			checksum = 8;
+		uint8_t checksum_byte = crc8_ccitt(0x07, buf, 6);
+		if (checksum_byte == 0)
+			checksum_byte = 8;
 		uint64_t *receiver_addr = (uint64_t *)NRF_FICR->DEVICEADDR; // Use device address as unique identifier (although it is not actually guaranteed, see datasheet
-		addr = (*receiver_addr & 0xFFFFFFFFFFFF) << 16;
-		addr |= checksum; // Add checksum to the address
-		addr |= (uint64_t)id << 8; // Add tracker id to the address
-		LOG_INF("Pair the device with %016llX", addr);
+		uint64_t pair_addr = (*receiver_addr & 0xFFFFFFFFFFFF) << 16;
+		pair_addr |= checksum_byte; // Add checksum to the address
+		pair_addr |= (uint64_t)assigned_id << 8; // Add tracker id to the address
+		LOG_INF("Pair the device with %016llX", pair_addr);
 	}
+
+	return assigned_id;
 }
 
 void esb_pop_pair(void)
 {
+	uint64_t removed_addr = 0;
+	int removed_id = -1;
+
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	if (stored_trackers > 0)
 	{
 		stored_trackers--;
+		removed_id = stored_trackers;
+		removed_addr = stored_tracker_addr[removed_id];
+		stored_tracker_addr[removed_id] = 0;
+	}
+	k_mutex_unlock(&tracker_store_lock);
+
+	if (removed_id >= 0)
+	{
 		sys_write(STORED_TRACKERS, NULL, &stored_trackers, sizeof(stored_trackers));
-		LOG_INF("Removed device on id %d with address %012llX", stored_trackers, stored_tracker_addr[stored_trackers]);
+		sys_write(STORED_ADDR_0 + removed_id, NULL, &stored_tracker_addr[removed_id], sizeof(stored_tracker_addr[0]));
+		LOG_INF("Removed device on id %d with address %012llX", removed_id, removed_addr);
 	}
 	else
 	{
@@ -629,31 +695,60 @@ void esb_pop_pair(void)
 	}
 }
 
-void esb_parse_pair()
+static bool esb_parse_pair(const uint8_t packet[8])
 {
-	uint64_t found_addr = (*(uint64_t *)pairing_buf >> 16) & 0xFFFFFFFFFFFF;
-	uint16_t send_tracker_id = stored_trackers; // Use new tracker id
-	for (int i = 0; i < stored_trackers; i++) // Check if the device is already stored
+	uint64_t raw_addr = 0;
+	memcpy(&raw_addr, packet, sizeof(raw_addr));
+	uint64_t found_addr = (raw_addr >> 16) & 0xFFFFFFFFFFFF;
+	uint8_t checksum = crc8_ccitt(0x07, &packet[2], 6);
+	if (checksum == 0)
+		checksum = 8;
+
+	uint16_t send_tracker_id = 0;
+	uint8_t tracker_count_snapshot = 0;
+
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	tracker_count_snapshot = stored_trackers;
+	send_tracker_id = tracker_count_snapshot; // default to next available ID
+	for (uint8_t i = 0; i < tracker_count_snapshot; i++)
 	{
 		if (found_addr != 0 && stored_tracker_addr[i] == found_addr)
 		{
-			//LOG_INF("Found device linked to id %d with address %012llX", i, found_addr);
 			send_tracker_id = i;
+			break;
 		}
 	}
-	uint8_t checksum = crc8_ccitt(0x07, &pairing_buf[2], 6); // make sure the packet is valid
-	if (checksum == 0)
-		checksum = 8;
-	if (checksum == pairing_buf[0] && found_addr != 0 && send_tracker_id == stored_trackers && stored_trackers < MAX_TRACKERS) // New device, add to NVS
+	k_mutex_unlock(&tracker_store_lock);
+
+	bool checksum_valid = (checksum == packet[0]);
+	bool has_capacity = tracker_count_snapshot < MAX_TRACKERS;
+	bool is_new_device = checksum_valid && found_addr != 0 && send_tracker_id == tracker_count_snapshot && has_capacity;
+	bool ack_valid = false;
+
+	if (is_new_device)
 	{
-		esb_add_pair(found_addr, false);
-		set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
+		int assigned_id = esb_add_pair(found_addr, false);
+		if (assigned_id >= 0)
+		{
+			send_tracker_id = (uint16_t)assigned_id;
+			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
+		}
+		else if (assigned_id == -ENOSPC)
+		{
+			LOG_WRN("Maximum tracker slots reached, cannot pair %012llX", found_addr);
+		}
+		else
+		{
+			LOG_ERR("Failed to store tracker address %012llX: %d", found_addr, assigned_id);
+		}
 	}
-	if (checksum == pairing_buf[0] && send_tracker_id < MAX_TRACKERS) // Make sure the dongle is not full
-		tx_payload_pair.data[0] = pairing_buf[0]; // Use checksum sent from device to make sure packet is for that device
-	else
-		tx_payload_pair.data[0] = 0; // Invalidate packet
-	tx_payload_pair.data[1] = send_tracker_id; // Add tracker id to packet
+
+	ack_valid = checksum_valid && send_tracker_id < MAX_TRACKERS;
+
+	tx_payload_pair.data[0] = ack_valid ? packet[0] : 0;
+	tx_payload_pair.data[1] = (send_tracker_id < MAX_TRACKERS) ? (uint8_t)send_tracker_id : 0xFF;
+
+	return ack_valid;
 }
 
 void esb_start_pairing(void)
@@ -668,7 +763,7 @@ void esb_start_pairing(void)
 	LOG_INF("Device address: %012llX", *addr & 0xFFFFFFFFFFFF);
 	set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 	esb_pairing = true;
-	pairing_buf[1] = 255; // initialize packet flag
+	k_msgq_purge(&esb_pairing_msgq);
 }
 
 void esb_pair(void)
@@ -683,7 +778,7 @@ void esb_pair(void)
 	LOG_INF("Device address: %012llX", *addr & 0xFFFFFFFFFFFF);
 	set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 	esb_pairing = true;
-	pairing_buf[1] = 255; // initialize packet flag
+	k_msgq_purge(&esb_pairing_msgq);
 	while (esb_pairing)
 	{
 		if (!esb_initialized)
@@ -691,23 +786,51 @@ void esb_pair(void)
 			esb_initialize(false);
 			esb_start_rx();
 		}
-		switch (pairing_buf[1])
+
+		struct pairing_event evt;
+		int q_err = k_msgq_get(&esb_pairing_msgq, &evt, K_MSEC(10));
+		if (q_err != 0)
 		{
-		case 2:
-			esb_flush_tx(); // Flush TX buffer for next pairing burst
-		case 255:
-			break;
-		default: // first packet in pairing burst
-			esb_parse_pair();
-			LOG_DBG("tx: %16llX", *(uint64_t *)tx_payload_pair.data);
-			esb_write_payload(&tx_payload_pair); // Add to TX buffer
+			continue;
+		}
+
+		switch (evt.packet[1])
+		{
+		case 0:
+		{
+			bool ack_ready = esb_parse_pair(evt.packet);
+			if (!ack_ready)
+			{
+				LOG_DBG("Pairing request invalid, not queueing response");
+				break;
+			}
+			esb_flush_tx();
+			int tx_err = esb_write_payload(&tx_payload_pair);
+			if (tx_err == -ENOSPC)
+			{
+				esb_flush_tx();
+				tx_err = esb_write_payload(&tx_payload_pair);
+			}
+			if (tx_err)
+			{
+				LOG_ERR("Failed to queue pairing response: %d", tx_err);
+			}
+			else
+			{
+				LOG_DBG("tx: %16llX", *(uint64_t *)tx_payload_pair.data);
+			}
 			break;
 		}
-		pairing_buf[1] = 255; // flag packet processed
-		//esb_flush_rx();
-		//esb_flush_tx();
-		//esb_write_payload(&tx_payload_pair); // Add to TX buffer
-		k_usleep(100);
+		case 2:
+			esb_flush_tx();
+			break;
+		case 1:
+			// Tracker acknowledged previous response, nothing to do
+			break;
+		default:
+			LOG_WRN("Unhandled pairing packet type %u", evt.packet[1]);
+			break;
+		}
 	}
 	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_CONNECTION);
 	esb_deinitialize();
@@ -722,12 +845,22 @@ void esb_reset_pair(void)
 void esb_finish_pair(void)
 {
 	esb_pairing = false;
+	k_msgq_purge(&esb_pairing_msgq);
 }
 
 void esb_clear(void)
 {
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	uint8_t previous_count = stored_trackers;
 	stored_trackers = 0;
+	memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));
+	k_mutex_unlock(&tracker_store_lock);
+
 	sys_write(STORED_TRACKERS, NULL, &stored_trackers, sizeof(stored_trackers));
+	for (uint8_t i = 0; i < previous_count && i < MAX_TRACKERS; i++)
+	{
+		sys_write(STORED_ADDR_0 + i, NULL, &stored_tracker_addr[i], sizeof(stored_tracker_addr[0]));
+	}
 	LOG_INF("NVS Reset");
 	esb_reset_pair();
 
@@ -816,11 +949,17 @@ static void esb_thread(void)
 	clocks_start();
 
 	sys_read(STORED_TRACKERS, &stored_trackers, sizeof(stored_trackers));
-	if (stored_trackers)
-		esb_paired = true;
-	for (int i = 0; i < stored_trackers; i++)
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	uint8_t tracker_count = stored_trackers;
+	for (uint8_t i = 0; i < tracker_count && i < MAX_TRACKERS; i++)
+	{
 		sys_read(STORED_ADDR_0 + i, &stored_tracker_addr[i], sizeof(stored_tracker_addr[0]));
-	LOG_INF("%d/%d devices stored", stored_trackers, MAX_TRACKERS);
+	}
+	k_mutex_unlock(&tracker_store_lock);
+
+	if (tracker_count)
+		esb_paired = true;
+	LOG_INF("%d/%d devices stored", tracker_count, MAX_TRACKERS);
 
 	if (esb_paired)
 	{

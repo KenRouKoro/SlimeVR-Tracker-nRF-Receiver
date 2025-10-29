@@ -23,6 +23,8 @@
 #ifndef SLIMENRF_ESB
 #define SLIMENRF_ESB
 
+#include <stdint.h>
+
 #include <esb.h>
 
 void event_handler(struct esb_evt const* event);
@@ -32,7 +34,7 @@ int esb_initialize(bool);
 void esb_set_addr_discovery(void);
 void esb_set_addr_paired(void);
 
-void esb_add_pair(uint64_t addr, bool checksum);
+int esb_add_pair(uint64_t addr, bool checksum);
 void esb_pop_pair(void);
 
 void esb_pair(void);
