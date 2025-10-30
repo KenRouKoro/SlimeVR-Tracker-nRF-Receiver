@@ -23,9 +23,14 @@
 #ifndef SLIMENRF_ESB
 #define SLIMENRF_ESB
 
+#include <esb.h>
 #include <stdint.h>
 
-#include <esb.h>
+// Ping/Pong constants (shared protocol)
+#define ESB_PING_TYPE 0xF0
+#define ESB_PONG_TYPE 0xF1
+#define ESB_PING_LEN 13
+#define ESB_PONG_LEN 13
 
 void event_handler(struct esb_evt const* event);
 int clocks_start(void);
