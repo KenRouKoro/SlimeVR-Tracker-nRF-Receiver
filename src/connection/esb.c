@@ -333,6 +333,7 @@ void event_handler(struct esb_evt const* event) {
 			break;
 		case ESB_EVENT_TX_FAILED:
 			LOG_DBG("TX FAILED");
+			esb_pop_tx();
 			break;
 		case ESB_EVENT_RX_RECEIVED:
 			// TODO: make tx payload for ack here
@@ -340,40 +341,6 @@ void event_handler(struct esb_evt const* event) {
 			if (!err)  // zero, rx success
 			{
 				switch (rx_payload.length) {
-					case ESB_PING_LEN:
-						LOG_DBG(
-							"Received PING type=%u id=%u ctr=%u",
-							rx_payload.data[0],
-							rx_payload.data[1],
-							rx_payload.data[2]
-						);
-						// Check for PING control packet and respond with PONG
-						if (rx_payload.data[0] == ESB_PING_TYPE) {
-							uint8_t tracker_id = rx_payload.data[1];
-							uint8_t counter = rx_payload.data[2];
-							uint32_t t_lo = ((uint32_t)rx_payload.data[3] << 24)
-										  | ((uint32_t)rx_payload.data[4] << 16)
-										  | ((uint32_t)rx_payload.data[5] << 8)
-										  | ((uint32_t)rx_payload.data[6]);
-							// Enqueue ACK event for worker thread
-							struct ack_event aevt = {
-								.tracker_id = tracker_id,
-								.counter = counter,
-								.pipe = rx_payload.pipe,
-								.t_lo = t_lo,
-							};
-							int q = k_msgq_put(&esb_ack_msgq, &aevt, K_NO_WAIT);
-							if (q) {
-								// Drop oldest and retry to keep latest ACKs
-								struct ack_event dropped;
-								if (k_msgq_get(&esb_ack_msgq, &dropped, K_NO_WAIT)
-									== 0) {
-									k_msgq_put(&esb_ack_msgq, &aevt, K_NO_WAIT);
-								}
-							}
-							/* No mutex; ISR context must avoid blocking. */
-						}
-						break;
 					case 8: {
 						struct pairing_event evt = {0};
 						memcpy(evt.packet, rx_payload.data, sizeof(evt.packet));
@@ -387,7 +354,7 @@ void event_handler(struct esb_evt const* event) {
 							}
 							if (q_err) {
 								LOG_WRN(
-									"Pairing queue full, dropping packet type %u",
+									"ACK queue full, dropping packet type %u",
 									evt.packet[1]
 								);
 							}
@@ -411,7 +378,39 @@ void event_handler(struct esb_evt const* event) {
 								break;
 						}
 						break;
-					}
+					} break;
+					case ESB_PING_LEN: {
+						LOG_DBG(
+							"Received PING type=%u id=%u ctr=%u",
+							rx_payload.data[0],
+							rx_payload.data[1],
+							rx_payload.data[2]
+						);
+						// Check for PING control packet and respond with PONG
+						if (rx_payload.data[0] == ESB_PING_TYPE) {
+							uint8_t tracker_id = rx_payload.data[1];
+							uint8_t counter = rx_payload.data[2];
+							uint32_t t_lo = ((uint32_t)rx_payload.data[3] << 24)
+										  | ((uint32_t)rx_payload.data[4] << 16)
+										  | ((uint32_t)rx_payload.data[5] << 8)
+										  | ((uint32_t)rx_payload.data[6]);
+							// Enqueue ACK event for worker thread
+							struct ack_event aevt = {
+								.tracker_id = tracker_id,
+								.counter = counter,
+								.pipe = rx_payload.pipe,
+								.t_lo = t_lo,
+							};
+							int q_err = k_msgq_put(&esb_ack_msgq, &aevt, K_NO_WAIT);
+							if (q_err) {
+								struct ack_event discarded;
+								if (k_msgq_get(&esb_ack_msgq, &discarded, K_NO_WAIT)
+									== 0) {
+									q_err = k_msgq_put(&esb_ack_msgq, &aevt, K_NO_WAIT);
+								}
+							}
+						}
+					} break;
 					case 21:  // 16 bytes data + 4 bytes CRC32 + 1 byte sequence number
 					{
 						uint32_t crc_check
@@ -591,7 +590,7 @@ static void esb_ack_thread(void) {
 		tx_payload_pong.length = ESB_PONG_LEN;
 		tx_payload_pong.data[0] = ESB_PONG_TYPE;
 		tx_payload_pong.data[1] = aevt.tracker_id;
-		tx_payload_pong.data[2] = aevt.counter;
+		tx_payload_pong.data[2] = aevt.counter++;
 		tx_payload_pong.data[3] = (aevt.t_lo >> 24) & 0xFF;
 		tx_payload_pong.data[4] = (aevt.t_lo >> 16) & 0xFF;
 		tx_payload_pong.data[5] = (aevt.t_lo >> 8) & 0xFF;
@@ -605,9 +604,10 @@ static void esb_ack_thread(void) {
 		tx_payload_pong.data[12]
 			= crc8_ccitt(0x07, tx_payload_pong.data, ESB_PONG_LEN - 1);
 
+		// esb_flush_tx();
 		int werr = esb_write_payload(&tx_payload_pong);
 		if (werr == -ENOSPC) {
-			// Avoid flushing or starting TX here; let PRX auto-ACK consume payloads
+			esb_flush_tx();
 			LOG_WRN(
 				"ACK worker: FIFO full, dropping PONG id=%u ctr=%u pipe=%u",
 				aevt.tracker_id,
@@ -717,7 +717,7 @@ int esb_initialize(bool tx) {
 		config.retransmit_delay = retransmit_delay_with_jitter;
 		// config.retransmit_count = 3;
 		// Use manual TX on PRX to control ACK payload timing
-		config.tx_mode = ESB_TXMODE_MANUAL;
+		// config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
 		// config.use_fast_ramp_up = true;
