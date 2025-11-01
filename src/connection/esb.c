@@ -1055,7 +1055,6 @@ void esb_pair(void) {
 					LOG_DBG("Pairing request invalid, not queueing response");
 					break;
 				}
-				esb_flush_tx();
 				int tx_err = esb_write_payload(&tx_payload_pair);
 				if (tx_err == -ENOSPC) {
 					esb_flush_tx();
