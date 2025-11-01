@@ -36,7 +36,7 @@ static struct tracker_report {
 	.data = {0}
 };;
 
-struct tracker_report reports[MAX_TRACKERS];
+struct tracker_report reports[MAX_TRACKERS * sizeof(struct tracker_report)];
 atomic_t report_write_index = 0;
 atomic_t report_read_index = 0;
 // read_index == write_index -> empty fifo
@@ -51,6 +51,7 @@ static ATOMIC_DEFINE(hid_ep_in_busy, 1);
 #define HID_EP_REPORT_COUNT 4
 #define HID_TPS_UPDATE_INTERVAL_MS 1000
 #define HID_STATS_POLL_INTERVAL_MS 200
+#define USB_EP_TIMEOUT_MS 100  // USB endpoint timeout threshold
 
 // EMA平滑因子配置
 // alpha = RSSI_EMA_ALPHA / 256
@@ -172,11 +173,26 @@ static uint32_t hid_stats_snapshot(bool *had_activity)
 
 static uint32_t dropped_reports = 0;
 static uint16_t max_dropped_reports = 0;
+static int64_t last_ep_busy_time = 0;  // Track USB endpoint busy time for timeout detection
 
 static void send_report(struct k_work *work)
 {
 	if (!usb_enabled) return;
 	if (!stored_trackers) return;
+
+	// Check if USB endpoint is stuck
+	if (atomic_test_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG)) {
+		int64_t now = k_uptime_get();
+		if (last_ep_busy_time == 0) {
+			last_ep_busy_time = now;
+		} else if (now - last_ep_busy_time > USB_EP_TIMEOUT_MS) {
+			LOG_WRN("USB endpoint stuck for %lld ms, forcing reset", now - last_ep_busy_time);
+			atomic_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
+			last_ep_busy_time = 0;
+		}
+	} else {
+		last_ep_busy_time = 0;
+	}
 
 	// Get current FIFO status atomically
 	size_t write_idx = (size_t)atomic_get(&report_write_index);
@@ -430,6 +446,11 @@ K_THREAD_DEFINE(usb_init_thread_id, 256, usb_init_thread, NULL, NULL, NULL, 6, 0
 //|4       |id      |q0               |q1               |q2               |q3               |m0               |m1               |m2               |
 //|255     |id      |addr                                                 |resv                                                                   |
 
+// Per-tracker FIFO drop tracking for detailed diagnostics
+static uint32_t tracker_drops[MAX_TRACKERS] = {0};
+static int64_t last_drop_log_time[MAX_TRACKERS] = {0};
+#define TRACKER_DROP_LOG_INTERVAL_MS 1000  // Log per-tracker drops every 1s
+
 void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 {
 	memcpy(&report.data, data, sizeof(report)); // all data can be passed through
@@ -445,31 +466,35 @@ void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 	size_t write_idx = (size_t)atomic_get(&report_write_index);
 	size_t read_idx = (size_t)atomic_get(&report_read_index);
 
-	// Try to replace existing entry for the same tracker first
-	if (write_idx != read_idx) {
-		// Start from read point + 1 to avoid hitting the entry being used
-		size_t check_index = read_idx + 1;
-		if (check_index == MAX_TRACKERS) check_index = 0;
+	// Calculate next write position
+	size_t next_write = write_idx + 1;
+	if (next_write == MAX_TRACKERS) next_write = 0;
 
-		while (check_index != write_idx) {
-			if (reports[check_index].data[1] == data[1]) {
-				// Replace existing entry
-				reports[check_index] = report;
-				return;
-			}
-			check_index = check_index + 1;
-			if (check_index == MAX_TRACKERS) check_index = 0;
+	// Check if FIFO is full
+	if (next_write == read_idx) {
+		dropped_reports++;
+		if (dropped_reports > max_dropped_reports) {
+			max_dropped_reports = dropped_reports;
 		}
-	}
-	if (write_idx + 1 == read_idx || (write_idx == MAX_TRACKERS-1 && read_idx == 0)) { // overflow
-		dropped_reports ++;
+
+		// Per-tracker drop tracking and logging
+		uint8_t tracker_id = data[1];
+		if (tracker_id < MAX_TRACKERS) {
+			tracker_drops[tracker_id]++;
+			int64_t now = k_uptime_get();
+			if (now - last_drop_log_time[tracker_id] >= TRACKER_DROP_LOG_INTERVAL_MS) {
+				LOG_WRN("FIFO full: dropped %u packets for tracker %u (write=%zu read=%zu)",
+						tracker_drops[tracker_id], tracker_id, write_idx, read_idx);
+				last_drop_log_time[tracker_id] = now;
+				tracker_drops[tracker_id] = 0;
+			}
+		}
 		return;
 	}
+
 	// Write new packet into FIFO
 	reports[write_idx] = report;
 
 	// Update write index atomically
-	write_idx ++;
-	if (write_idx == MAX_TRACKERS) write_idx = 0;
-	atomic_set(&report_write_index, write_idx);
+	atomic_set(&report_write_index, next_write);
 }

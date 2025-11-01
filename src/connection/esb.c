@@ -56,10 +56,10 @@ struct ack_event {
 	uint8_t pipe;
 	uint32_t t_lo;
 };
-K_MSGQ_DEFINE(esb_ack_msgq, sizeof(struct ack_event), 16, 4);
+K_MSGQ_DEFINE(esb_ack_msgq, sizeof(struct ack_event), 20, 4);
 
 static void esb_ack_thread(void);
-K_THREAD_DEFINE(esb_ack_thread_id, 512, esb_ack_thread, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(esb_ack_thread_id, 512, esb_ack_thread, NULL, NULL, NULL, 4, 0, 0);  // Priority 4 (higher than esb_thread at 5)
 
 // Serialize ACK payload generation to avoid races in auto TX mode
 // Avoid blocking primitives in ISR; build ACK payload inline without mutex.
@@ -333,7 +333,7 @@ void event_handler(struct esb_evt const* event) {
 			break;
 		case ESB_EVENT_TX_FAILED:
 			LOG_DBG("TX FAILED");
-			esb_pop_tx();
+			// esb_pop_tx();
 			break;
 		case ESB_EVENT_RX_RECEIVED:
 			// TODO: make tx payload for ack here
@@ -403,10 +403,24 @@ void event_handler(struct esb_evt const* event) {
 							};
 							int q_err = k_msgq_put(&esb_ack_msgq, &aevt, K_NO_WAIT);
 							if (q_err) {
+								// Queue full - try to discard oldest and retry
 								struct ack_event discarded;
 								if (k_msgq_get(&esb_ack_msgq, &discarded, K_NO_WAIT)
 									== 0) {
 									q_err = k_msgq_put(&esb_ack_msgq, &aevt, K_NO_WAIT);
+									if (q_err == 0) {
+										LOG_WRN(
+											"ACK queue full, discarded PING from tracker %u to make room",
+											discarded.tracker_id
+										);
+									}
+								}
+								if (q_err) {
+									LOG_ERR(
+										"ACK queue full, dropping PING from tracker %u ctr=%u",
+										tracker_id,
+										counter
+									);
 								}
 							}
 						}
@@ -580,7 +594,7 @@ void event_handler(struct esb_evt const* event) {
 static void esb_ack_thread(void) {
 	while (1) {
 		struct ack_event aevt;
-		int r = k_msgq_get(&esb_ack_msgq, &aevt, K_MSEC(50));
+		int r = k_msgq_get(&esb_ack_msgq, &aevt, K_FOREVER);
 		if (r) {
 			continue;
 		}
@@ -604,34 +618,62 @@ static void esb_ack_thread(void) {
 		tx_payload_pong.data[12]
 			= crc8_ccitt(0x07, tx_payload_pong.data, ESB_PONG_LEN - 1);
 
-		// esb_flush_tx();
-		int werr = esb_write_payload(&tx_payload_pong);
-		if (werr == -ENOSPC) {
-			esb_flush_tx();
-			LOG_WRN(
-				"ACK worker: FIFO full, dropping PONG id=%u ctr=%u pipe=%u",
-				aevt.tracker_id,
-				aevt.counter,
-				aevt.pipe
-			);
-			continue;
-		}
-		if (werr) {
-			LOG_WRN(
-				"ACK worker: failed to queue PONG id=%u ctr=%u pipe=%u: %d",
-				aevt.tracker_id,
-				aevt.counter,
-				aevt.pipe,
-				werr
-			);
-			continue;
-		}
-		LOG_DBG(
-			"Responded PONG id=%u ctr=%u pipe=%u",
-			aevt.tracker_id,
-			aevt.counter,
-			aevt.pipe
-		);
+		// Retry sending PONG with exponential backoff if FIFO is full
+		int werr;
+		int retry_count = 0;
+		const int max_retries = 5;
+		const int base_delay_ms = 1;
+
+		do {
+			werr = esb_write_payload(&tx_payload_pong);
+
+			if (werr == 0) {
+				// Success
+				LOG_DBG(
+					"Responded PONG id=%u ctr=%u pipe=%u%s",
+					aevt.tracker_id,
+					aevt.counter,
+					aevt.pipe,
+					retry_count > 0 ? " (after retry)" : ""
+				);
+				break;
+			}
+
+			if (werr == -ENOSPC) {
+				// FIFO full - flush and retry with backoff
+				esb_flush_tx();
+				retry_count++;
+
+				if (retry_count <= max_retries) {
+					int delay_ms = base_delay_ms << (retry_count - 1);  // 1, 2, 4, 8, 16 ms
+					LOG_WRN(
+						"ACK worker: FIFO full for PONG id=%u, retry %d/%d after %dms",
+						aevt.tracker_id,
+						retry_count,
+						max_retries,
+						delay_ms
+					);
+					k_msleep(delay_ms);
+				} else {
+					LOG_ERR(
+						"ACK worker: Failed to send PONG id=%u after %d retries, dropping",
+						aevt.tracker_id,
+						max_retries
+					);
+					break;
+				}
+			} else {
+				// Other error
+				LOG_ERR(
+					"ACK worker: failed to queue PONG id=%u ctr=%u pipe=%u: %d",
+					aevt.tracker_id,
+					aevt.counter,
+					aevt.pipe,
+					werr
+				);
+				break;
+			}
+		} while (retry_count <= max_retries);
 	}
 }
 
