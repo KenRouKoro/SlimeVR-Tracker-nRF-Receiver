@@ -59,7 +59,17 @@ struct ack_event {
 K_MSGQ_DEFINE(esb_ack_msgq, sizeof(struct ack_event), 20, 4);
 
 static void esb_ack_thread(void);
-K_THREAD_DEFINE(esb_ack_thread_id, 512, esb_ack_thread, NULL, NULL, NULL, 4, 0, 0);  // Priority 4 (higher than esb_thread at 5)
+K_THREAD_DEFINE(
+	esb_ack_thread_id,
+	512,
+	esb_ack_thread,
+	NULL,
+	NULL,
+	NULL,
+	4,
+	0,
+	0
+);  // Priority 4 (higher than esb_thread at 5)
 
 // Serialize ACK payload generation to avoid races in auto TX mode
 // Avoid blocking primitives in ISR; build ACK payload inline without mutex.
@@ -333,13 +343,19 @@ void event_handler(struct esb_evt const* event) {
 			break;
 		case ESB_EVENT_TX_FAILED:
 			LOG_DBG("TX FAILED");
-			// esb_pop_tx();
+			esb_pop_tx();
 			break;
 		case ESB_EVENT_RX_RECEIVED:
-			// TODO: make tx payload for ack here
-			int err = esb_read_rx_payload(&rx_payload);
-			if (!err)  // zero, rx success
+			int err = 0;
+			while (!err)  // zero, rx success
 			{
+				err = esb_read_rx_payload(&rx_payload);
+				if (err == -ENODATA) {
+					return;
+				} else if (err) {
+					LOG_ERR("Error while reading rx packet: %d", err);
+					return;
+				}
 				switch (rx_payload.length) {
 					case 8: {
 						struct pairing_event evt = {0};
@@ -583,8 +599,6 @@ void event_handler(struct esb_evt const* event) {
 						LOG_ERR("Wrong packet length: %d", rx_payload.length);
 						break;
 				}
-			} else {
-				LOG_ERR("Error while reading rx packet: %d", err);
 			}
 			break;
 	}
