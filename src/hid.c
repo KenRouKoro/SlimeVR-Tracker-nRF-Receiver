@@ -178,6 +178,7 @@ static int64_t last_ep_busy_time = 0;  // Track USB endpoint busy time for timeo
 static void send_report(struct k_work *work)
 {
 	if (!usb_enabled) return;
+	if (!configured) return;  // Don't send reports until USB is configured
 	if (!stored_trackers) return;
 
 	// Check if USB endpoint is stuck
