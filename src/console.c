@@ -199,6 +199,7 @@ static void console_thread(void)
 	printk("clear                        Clear stored devices\n");
 	printk("stats                        Show packet statistics\n");
 	printk("resetstats                   Reset packet statistics\n");
+	printk("send <id|all> <command>      Send remote command to tracker(s)\n");
 
 	uint8_t command_info[] = "info";
 	uint8_t command_uptime[] = "uptime";
@@ -211,6 +212,7 @@ static void console_thread(void)
 	uint8_t command_clear[] = "clear";
 	uint8_t command_stats[] = "stats";
 	uint8_t command_resetstats[] = "resetstats";
+	uint8_t command_send[] = "send";
 
 #if DFU_EXISTS
 	printk("dfu                          Enter DFU bootloader\n");
@@ -236,16 +238,34 @@ static void console_thread(void)
 	while (1) {
 		uint8_t *line = console_getline();
 		uint8_t *arg = NULL;
-		for (uint8_t *p = line; *p; ++p)
-		{
+		uint8_t *arg2 = NULL;
+
+		// Parse command and arguments
+		uint8_t *p = line;
+		while (*p) {
 			*p = tolower(*p);
-			if (*p == ' ' && !arg)
-			{
-				*p = 0;
-				p++;
-				*p = tolower(*p);
-				if (*p)
-					arg = p;
+			p++;
+		}
+
+		// Split by spaces
+		p = line;
+		while (*p && *p != ' ') p++;
+		if (*p == ' ') {
+			*p = 0;
+			p++;
+			while (*p == ' ') p++;  // Skip multiple spaces
+			if (*p) {
+				arg = p;
+				// Find second argument
+				while (*p && *p != ' ') p++;
+				if (*p == ' ') {
+					*p = 0;
+					p++;
+					while (*p == ' ') p++;
+					if (*p) {
+						arg2 = p;
+					}
+				}
 			}
 		}
 
@@ -319,6 +339,87 @@ static void console_thread(void)
 		else if (memcmp(line, command_resetstats, sizeof(command_resetstats)) == 0)
 		{
 			esb_reset_all_stats();
+		}
+		else if (memcmp(line, command_send, sizeof(command_send)) == 0)
+		{
+			if (!arg || !arg2)
+			{
+				printk("Usage: send <id|all> <command>\n");
+				printk("Examples:\n");
+				printk("  send 0 shutdown      - Shutdown tracker 0\n");
+				printk("  send all shutdown    - Shutdown all trackers\n");
+				printk("  send 1 calibrate     - Calibrate tracker 1\n");
+				printk("  send all meow        - Make all trackers meow\n");
+				printk("Available commands: shutdown, calibrate, 6-side, meow, scan, mag\n");
+			}
+			else
+			{
+				// Parse target (id or "all")
+				bool target_all = (strcmp(arg, "all") == 0);
+				uint8_t tracker_id = 0;
+
+				if (!target_all)
+				{
+					// Parse tracker ID
+					char *endptr;
+					long id = strtol(arg, &endptr, 10);
+
+					if (*endptr != '\0' || id < 0 || id > 255)
+					{
+						printk("Invalid tracker ID. Use a number (0-255) or 'all'\n");
+						continue;
+					}
+					tracker_id = (uint8_t)id;
+				}
+
+				// Process command
+				uint8_t cmd_flag = 0xFF;
+				const char *cmd_name = NULL;
+
+				if (strcmp(arg2, "shutdown") == 0) {
+					cmd_flag = ESB_PONG_FLAG_SHUTDOWN;
+					cmd_name = "Shutdown";
+				}
+				else if (strcmp(arg2, "calibrate") == 0) {
+					cmd_flag = ESB_PONG_FLAG_CALIBRATE;
+					cmd_name = "Calibrate";
+				}
+				else if (strcmp(arg2, "6-side") == 0) {
+					cmd_flag = ESB_PONG_FLAG_SIX_SIDE_CAL;
+					cmd_name = "6-side calibration";
+				}
+				else if (strcmp(arg2, "meow") == 0) {
+					cmd_flag = ESB_PONG_FLAG_MEOW;
+					cmd_name = "Meow";
+				}
+				else if (strcmp(arg2, "scan") == 0) {
+					cmd_flag = ESB_PONG_FLAG_SCAN;
+					cmd_name = "Sensor scan";
+				}
+				else if (strcmp(arg2, "mag") == 0) {
+					cmd_flag = ESB_PONG_FLAG_MAG_CLEAR;
+					cmd_name = "Magnetometer clear";
+				}
+
+				if (cmd_flag != 0xFF)
+				{
+					if (target_all)
+					{
+						esb_send_remote_command_all(cmd_flag);
+						printk("%s request sent to all trackers\n", cmd_name);
+					}
+					else
+					{
+						esb_send_remote_command(tracker_id, cmd_flag);
+						printk("%s request sent to tracker %d\n", cmd_name, tracker_id);
+					}
+				}
+				else
+				{
+					printk("Unknown command: %s\n", arg2);
+					printk("Available commands: shutdown, calibrate, 6-side, meow, scan, mag\n");
+				}
+			}
 		}
 #if DFU_EXISTS
 		else if (memcmp(line, command_dfu, sizeof(command_dfu)) == 0)

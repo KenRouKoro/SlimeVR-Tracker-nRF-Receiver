@@ -32,6 +32,16 @@
 #define ESB_PING_LEN 13
 #define ESB_PONG_LEN 13
 
+// Remote command flags for PONG data[7]
+#define ESB_PONG_FLAG_NORMAL 0x00
+#define ESB_PONG_FLAG_SHUTDOWN 0x01
+#define ESB_PONG_FLAG_CALIBRATE 0x02        // Trigger gyro/accel ZRO calibration
+#define ESB_PONG_FLAG_SIX_SIDE_CAL 0x03     // Trigger 6-point accelerometer calibration
+#define ESB_PONG_FLAG_MEOW 0x04             // Trigger meow output
+#define ESB_PONG_FLAG_SCAN 0x05             // Trigger sensor scan
+#define ESB_PONG_FLAG_MAG_CLEAR 0x06        // Clear magnetometer calibration
+// Reserved for future use: 0x07-0xFF
+
 void event_handler(struct esb_evt const* event);
 int clocks_start(void);
 int esb_initialize(bool);
@@ -52,5 +62,18 @@ void esb_print_all_stats(void);
 void esb_reset_all_stats(void);
 void esb_write_sync(uint16_t led_clock);
 void esb_receive(void);
+
+// Remote command API
+void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
+void esb_send_remote_command_all(uint8_t command_flag);
+
+// Convenience wrappers for specific commands
+static inline void esb_request_tracker_shutdown(uint8_t tracker_id) {
+	esb_send_remote_command(tracker_id, ESB_PONG_FLAG_SHUTDOWN);
+}
+
+static inline void esb_request_all_shutdown(void) {
+	esb_send_remote_command_all(ESB_PONG_FLAG_SHUTDOWN);
+}
 
 #endif

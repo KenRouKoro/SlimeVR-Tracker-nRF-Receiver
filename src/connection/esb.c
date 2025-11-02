@@ -86,6 +86,7 @@ static K_MUTEX_DEFINE(tracker_store_lock);
 static uint8_t discovered_trackers[MAX_TRACKERS] = {0};
 static uint8_t last_packet_sequence[MAX_TRACKERS];  // 追踪每个追踪器的最后一个包序号
 static uint8_t packet_count[MAX_TRACKERS] = {0};  // 每个追踪器接收到的包计数
+static uint8_t tracker_remote_command[MAX_TRACKERS] = {ESB_PONG_FLAG_NORMAL};  // 追踪器远程命令标志
 
 // 丢包统计结构
 struct packet_stats {
@@ -623,7 +624,12 @@ static void esb_ack_thread(void) {
 		tx_payload_pong.data[4] = (aevt.t_lo >> 16) & 0xFF;
 		tx_payload_pong.data[5] = (aevt.t_lo >> 8) & 0xFF;
 		tx_payload_pong.data[6] = (aevt.t_lo) & 0xFF;
-		tx_payload_pong.data[7] = 0x00;  // flags
+		// Set remote command flag and clear after sending
+		tx_payload_pong.data[7] = tracker_remote_command[aevt.tracker_id];
+		// Auto-clear one-shot commands after sending
+		if (tracker_remote_command[aevt.tracker_id] != ESB_PONG_FLAG_NORMAL) {
+			tracker_remote_command[aevt.tracker_id] = ESB_PONG_FLAG_NORMAL;
+		}
 		uint32_t rxt = (uint32_t)k_uptime_get();
 		tx_payload_pong.data[8] = (rxt >> 24) & 0xFF;
 		tx_payload_pong.data[9] = (rxt >> 16) & 0xFF;
@@ -1140,6 +1146,80 @@ void esb_reset_tracker_sequence(uint8_t tracker_id) {
 			tracker_id
 		);
 	}
+}
+
+// 发送远程命令到指定追踪器
+void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag) {
+	if (tracker_id < MAX_TRACKERS) {
+		tracker_remote_command[tracker_id] = command_flag;
+		const char* cmd_name = "UNKNOWN";
+		switch (command_flag) {
+			case ESB_PONG_FLAG_NORMAL:
+				cmd_name = "NORMAL";
+				break;
+			case ESB_PONG_FLAG_SHUTDOWN:
+				cmd_name = "SHUTDOWN";
+				break;
+			case ESB_PONG_FLAG_CALIBRATE:
+				cmd_name = "CALIBRATE";
+				break;
+			case ESB_PONG_FLAG_SIX_SIDE_CAL:
+				cmd_name = "SIX_SIDE_CAL";
+				break;
+			case ESB_PONG_FLAG_MEOW:
+				cmd_name = "MEOW";
+				break;
+			case ESB_PONG_FLAG_SCAN:
+				cmd_name = "SCAN";
+				break;
+			case ESB_PONG_FLAG_MAG_CLEAR:
+				cmd_name = "MAG_CLEAR";
+				break;
+		}
+		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", cmd_name, command_flag, tracker_id);
+	} else {
+		LOG_ERR("Invalid tracker ID: %d", tracker_id);
+	}
+}
+
+// 发送远程命令到所有已配对的追踪器
+void esb_send_remote_command_all(uint8_t command_flag) {
+	uint8_t count = 0;
+	const char* cmd_name = "UNKNOWN";
+	switch (command_flag) {
+		case ESB_PONG_FLAG_NORMAL:
+			cmd_name = "NORMAL";
+			break;
+		case ESB_PONG_FLAG_SHUTDOWN:
+			cmd_name = "SHUTDOWN";
+			break;
+		case ESB_PONG_FLAG_CALIBRATE:
+			cmd_name = "CALIBRATE";
+			break;
+		case ESB_PONG_FLAG_SIX_SIDE_CAL:
+			cmd_name = "SIX_SIDE_CAL";
+			break;
+		case ESB_PONG_FLAG_MEOW:
+			cmd_name = "MEOW";
+			break;
+		case ESB_PONG_FLAG_SCAN:
+			cmd_name = "SCAN";
+			break;
+		case ESB_PONG_FLAG_MAG_CLEAR:
+			cmd_name = "MAG_CLEAR";
+			break;
+	}
+
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
+		if (stored_tracker_addr[i] != 0) {
+			tracker_remote_command[i] = command_flag;
+			count++;
+		}
+	}
+	k_mutex_unlock(&tracker_store_lock);
+
+	LOG_INF("Remote command %s (0x%02X) queued for %d trackers", cmd_name, command_flag, count);
 }
 
 // 手动打印所有活跃追踪器的统计信息
