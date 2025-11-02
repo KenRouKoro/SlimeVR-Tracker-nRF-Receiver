@@ -82,13 +82,5 @@ int main(void)
 	// Clear boot LED priority
 	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_BOOT);
 
-	LOG_INF("SlimeVR Receiver initialized with button support");
-	LOG_INF("Button functions:");
-	LOG_INF("  Short press (1x): Status check");
-	LOG_INF("  Quick press (2x): Exit pairing mode");
-	LOG_INF("  Quick press (3x): Enter pairing mode");
-	LOG_INF("  Long press (5s): Clear all pairings");
-	LOG_INF("  Long press (10s): Enter DFU mode");
-
 	return 0;
 }

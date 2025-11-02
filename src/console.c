@@ -222,6 +222,17 @@ static void console_thread(void)
 
 	uint8_t command_meow[] = "meow";
 
+	printk("\n");
+	printk("Button functions:\n");
+	printk("  Short press (1x): Status check\n");
+	printk("  Quick press (2x): Exit pairing mode\n");
+	printk("  Quick press (3x): Enter pairing mode\n");
+	printk("  Long press (5s): Clear all pairings\n");
+#if DFU_EXISTS
+	printk("  Long press (10s): Enter DFU mode\n");
+#endif
+	printk("\n");
+
 	while (1) {
 		uint8_t *line = console_getline();
 		uint8_t *arg = NULL;
