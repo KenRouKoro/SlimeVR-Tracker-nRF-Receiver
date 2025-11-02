@@ -155,6 +155,54 @@ static void print_meow(void)
 	printk("%s%s%s\n", meows[meow], meow_punctuations[punctuation], meow_suffixes[suffix]);
 }
 
+static void print_help(void)
+{
+	printk("\n=== Available Commands ===\n\n");
+	printk("Device Information:\n");
+	printk("  info                       Get device information\n");
+	printk("  uptime                     Get device uptime\n");
+	printk("  list                       Get paired devices\n");
+	printk("\n");
+	printk("Device Management:\n");
+	printk("  reboot                     Soft reset the device\n");
+	printk("  add <address>              Manually add a device\n");
+	printk("  remove                     Remove last device\n");
+	printk("  pair                       Enter pairing mode\n");
+	printk("  exit                       Exit pairing mode\n");
+	printk("  clear                      Clear stored devices\n");
+	printk("\n");
+	printk("Statistics:\n");
+	printk("  stats                      Show packet statistics\n");
+	printk("  resetstats                 Reset packet statistics\n");
+	printk("\n");
+	printk("Remote Commands:\n");
+	printk("  send <id|all> <command>    Send remote command to tracker(s)\n");
+	printk("    Commands: shutdown, calibrate, 6-side, meow, scan, mag\n");
+	printk("    Examples:\n");
+	printk("      send 0 shutdown          Shutdown tracker 0\n");
+	printk("      send all calibrate       Calibrate all trackers\n");
+	printk("      send 1 meow              Make tracker 1 meow\n");
+	printk("\n");
+#if DFU_EXISTS
+	printk("Bootloader:\n");
+	printk("  dfu                        Enter DFU bootloader\n");
+	printk("\n");
+#endif
+	printk("Other:\n");
+	printk("  meow                       Meow!\n");
+	printk("  help                       Show this help message\n");
+	printk("\n");
+	printk("Button Functions:\n");
+	printk("  Short press (1x):          Status check\n");
+	printk("  Quick press (2x):          Exit pairing mode\n");
+	printk("  Quick press (3x):          Enter pairing mode\n");
+	printk("  Long press (5s):           Clear all pairings\n");
+#if DFU_EXISTS
+	printk("  Long press (10s):          Enter DFU mode\n");
+#endif
+	printk("\n");
+}
+
 static void print_list(void)
 {
 	printk("Stored devices:\n");
@@ -188,18 +236,9 @@ static void console_thread(void)
 
 	printk("*** " CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT " ***\n");
 	printk(FW_STRING);
-	printk("info                         Get device information\n");
-	printk("uptime                       Get device uptime\n");
-	printk("list                         Get paired devices\n");
-	printk("reboot                       Soft reset the device\n");
-	printk("add <address>                Manually add a device\n");
-	printk("remove                       Remove last device\n");
-	printk("pair                         Enter pairing mode\n");
-	printk("exit                         Exit pairing mode\n");
-	printk("clear                        Clear stored devices\n");
-	printk("stats                        Show packet statistics\n");
-	printk("resetstats                   Reset packet statistics\n");
-	printk("send <id|all> <command>      Send remote command to tracker(s)\n");
+
+	// Print help on startup
+	print_help();
 
 	uint8_t command_info[] = "info";
 	uint8_t command_uptime[] = "uptime";
@@ -213,27 +252,13 @@ static void console_thread(void)
 	uint8_t command_stats[] = "stats";
 	uint8_t command_resetstats[] = "resetstats";
 	uint8_t command_send[] = "send";
+	uint8_t command_help[] = "help";
 
 #if DFU_EXISTS
-	printk("dfu                          Enter DFU bootloader\n");
-
 	uint8_t command_dfu[] = "dfu";
 #endif
 
-	printk("meow                         Meow!\n");
-
 	uint8_t command_meow[] = "meow";
-
-	printk("\n");
-	printk("Button functions:\n");
-	printk("  Short press (1x): Status check\n");
-	printk("  Quick press (2x): Exit pairing mode\n");
-	printk("  Quick press (3x): Enter pairing mode\n");
-	printk("  Long press (5s): Clear all pairings\n");
-#if DFU_EXISTS
-	printk("  Long press (10s): Enter DFU mode\n");
-#endif
-	printk("\n");
 
 	while (1) {
 		uint8_t *line = console_getline();
@@ -269,7 +294,11 @@ static void console_thread(void)
 			}
 		}
 
-		if (memcmp(line, command_info, sizeof(command_info)) == 0)
+		if (memcmp(line, command_help, sizeof(command_help)) == 0)
+		{
+			print_help();
+		}
+		else if (memcmp(line, command_info, sizeof(command_info)) == 0)
 		{
 			print_info();
 		}
