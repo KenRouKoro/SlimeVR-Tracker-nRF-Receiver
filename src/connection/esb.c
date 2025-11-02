@@ -409,6 +409,7 @@ void event_handler(struct esb_evt const* event) {
 										| ((uint32_t)rx_payload.data[4] << 16)
 										| ((uint32_t)rx_payload.data[5] << 8)
 										| ((uint32_t)rx_payload.data[6]);
+						uint8_t ping_ack_flag = rx_payload.data[7];  // 追踪器回显的命令确认
 
 						if (tracker_id >= MAX_TRACKERS) {
 							LOG_ERR("Invalid tracker_id %u in PING", tracker_id);
@@ -433,6 +434,19 @@ void event_handler(struct esb_evt const* event) {
 
 						ack_statistics.total_pings++;
 
+						// 检查追踪器是否确认收到了命令
+						if (ping_ack_flag != ESB_PONG_FLAG_NORMAL) {
+							// 追踪器已确认收到命令，清除本地命令标志
+							if (tracker_remote_command[tracker_id] == ping_ack_flag) {
+								tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
+								LOG_DBG(
+									"Tracker %u confirmed command 0x%02X, clearing flag",
+									tracker_id,
+									ping_ack_flag
+								);
+							}
+						}
+
 						// 在ISR中使用栈上的局部变量构建PONG，避免全局变量的数据竞争
 						// 每个PING事件都有自己独立的PONG payload
 						struct esb_payload pong = {
@@ -443,16 +457,13 @@ void event_handler(struct esb_evt const* event) {
 
 						pong.data[0] = ESB_PONG_TYPE;
 						pong.data[1] = tracker_id;
-						pong.data[2] = counter;
+						pong.data[2] = counter++;
 						pong.data[3] = (t_lo >> 24) & 0xFF;
 						pong.data[4] = (t_lo >> 16) & 0xFF;
 						pong.data[5] = (t_lo >> 8) & 0xFF;
 						pong.data[6] = (t_lo) & 0xFF;
 						pong.data[7] = tracker_remote_command[tracker_id];
-						// Auto-clear one-shot commands after sending
-						if (tracker_remote_command[tracker_id] != ESB_PONG_FLAG_NORMAL) {
-							tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
-						}
+						// 不再立即清除命令标志，等待追踪器在下次PING中确认
 						uint32_t rxt = (uint32_t)k_uptime_get();
 						pong.data[8] = (rxt >> 24) & 0xFF;
 						pong.data[9] = (rxt >> 16) & 0xFF;
@@ -467,10 +478,11 @@ void event_handler(struct esb_evt const* event) {
 							esb_start_tx();
 							ack_statistics.sent_pongs++;
 							LOG_DBG(
-								"ACK payload set and started: PONG id=%u ctr=%u pipe=%u",
+								"ACK payload set and started: PONG id=%u ctr=%u pipe=%u cmd=0x%02X",
 								tracker_id,
 								counter,
-								rx_payload.pipe
+								rx_payload.pipe,
+								tracker_remote_command[tracker_id]
 							);
 						} else {
 							ack_statistics.failed_pongs++;
