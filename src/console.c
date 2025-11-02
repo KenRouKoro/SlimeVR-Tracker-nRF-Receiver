@@ -28,6 +28,7 @@
 #if DT_NODE_HAS_STATUS(USB, okay)
 
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/uart.h>
 #include <zephyr/console/console.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/logging/log_ctrl.h>
@@ -164,9 +165,27 @@ static void print_list(void)
 static void console_thread(void)
 {
 	console_getline_init();
+
+	// Wait for any pending log data to be processed
 	while (log_data_pending())
 		k_usleep(1);
-	k_msleep(100);
+
+	// Wait for USB CDC to be ready by checking DTR (Data Terminal Ready) signal
+	// This ensures the terminal is actually connected and ready to receive data
+	const struct device *uart_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+	if (device_is_ready(uart_dev)) {
+		uint32_t dtr = 0;
+		// Wait up to 5 seconds for DTR to be asserted (terminal connected)
+		for (int i = 0; i < 50; i++) {
+			if (uart_line_ctrl_get(uart_dev, UART_LINE_CTRL_DTR, &dtr) == 0 && dtr) {
+				break;
+			}
+			k_msleep(100);
+		}
+		// Give a bit more time for the terminal to be fully ready
+		k_msleep(100);
+	}
+
 	printk("*** " CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT " ***\n");
 	printk(FW_STRING);
 	printk("info                         Get device information\n");
