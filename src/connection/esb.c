@@ -466,7 +466,7 @@ void event_handler(struct esb_evt const* event) {
 							// 在手动模式下，需要启动TX来发送ACK payload
 							esb_start_tx();
 							ack_statistics.sent_pongs++;
-							LOG_INF(
+							LOG_DBG(
 								"ACK payload set and started: PONG id=%u ctr=%u pipe=%u",
 								tracker_id,
 								counter,
