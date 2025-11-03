@@ -187,6 +187,21 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 		return 4;  // 重复包
 	}
 
+	// 向后跳跃（旧包）视为乱序，保持当前窗口不变
+	// 注意：乱序包不计入total_received，因为会被丢弃，不转发到应用层
+	// 检查条件：diff_backward较小（< 128），说明是真正的向后跳跃（旧包）
+	if (diff_backward > 0 && diff_backward < 128) {
+		stats->out_of_order++;
+		LOG_DBG(
+			"Out-of-order packet dropped: tracker=%d, seq=%d (expected >%d), backward=%d",
+			tracker_id,
+			received_seq,
+			last_seq,
+			diff_backward
+		);
+		return 2;
+	}
+
 	// 检测大跳跃（可能是重启）
 	// 如果跳跃超过128（序号空间的一半），很可能是追踪器重启或回环
 	// 在这种情况下，不应该累加大量的gaps
@@ -197,7 +212,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 		last_packet_sequence[tracker_id] = received_seq;
 		packet_count[tracker_id]++;
 		stats->last_sequence = received_seq;
-		LOG_DBG(
+		LOG_WRN(
 			"Tracker restart detected: tracker=%d, last_seq=%d, new_seq=%d, jump=%d",
 			tracker_id,
 			last_seq,
@@ -225,19 +240,6 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 		return 1;
 	}
 
-	// 向后跳跃（旧包）视为乱序，保持当前窗口不变
-	if (diff_backward > 0) {
-		stats->total_received++;
-		stats->out_of_order++;
-		LOG_DBG(
-			"Out-of-order: tracker=%d, seq=%d, backward=%d",
-			tracker_id,
-			received_seq,
-			diff_backward
-		);
-		return 2;
-	}
-
 	// 默认不应到达此处，作为保险：当作重复包处理
 	stats->duplicate_packets++;
 	return 4;
@@ -251,8 +253,8 @@ static void print_tracker_stats(uint8_t tracker_id) {
 		return;  // 没有数据则不打印
 	}
 
-	// 总的接收次数（包括重复包）
-	uint32_t total_receives = stats->total_received + stats->duplicate_packets;
+	// 总的接收次数（包括重复包和乱序包）
+	uint32_t total_receives = stats->total_received + stats->duplicate_packets + stats->out_of_order;
 
 	// 计算各种比率
 	float duplicate_rate = 0.0f;
@@ -261,11 +263,10 @@ static void print_tracker_stats(uint8_t tracker_id) {
 
 	if (total_receives > 0) {
 		duplicate_rate = ((float)stats->duplicate_packets / total_receives) * 100.0f;
+		out_of_order_rate = ((float)stats->out_of_order / total_receives) * 100.0f;
 	}
 
 	if (stats->total_received > 0) {
-		out_of_order_rate
-			= ((float)stats->out_of_order / stats->total_received) * 100.0f;
 		gap_rate = ((float)stats->gap_events / stats->total_received) * 100.0f;
 	}
 
@@ -277,11 +278,12 @@ static void print_tracker_stats(uint8_t tracker_id) {
 	}
 
 	LOG_INF(
-		"Tracker %d: Recv=%u(+%u dup), Normal=%u, EstLoss=%.1f%% (%u gaps), "
+		"Tracker %d: Recv=%u(+%u dup +%u ooo), Normal=%u, EstLoss=%.1f%% (%u gaps), "
 		"Dup=%.1f%%, OOO=%.1f%%, Restart=%u, TPS=%u",
 		tracker_id,
 		stats->total_received,
 		stats->duplicate_packets,
+		stats->out_of_order,
 		stats->normal_packets,
 		(double)estimated_loss_rate,
 		stats->total_gaps,
@@ -561,7 +563,12 @@ void event_handler(struct esb_evt const* event) {
 						// 根据序号检查结果决定是否转发数据包
 						// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
 						if (seq_result == 4) {
+							LOG_DBG("TRK %d: Duplicate packet seq=%d, dropped", imu_id, received_sequence);
 							break;  // 丢弃重复包
+						}
+						if (seq_result == 2) {
+							LOG_DBG("TRK %d: Out-of-order packet seq=%d, dropped", imu_id, received_sequence);
+							break;  // 丢弃乱序包，避免姿态计算错误
 						}
 
 						hid_write_packet_n(
@@ -632,7 +639,12 @@ void event_handler(struct esb_evt const* event) {
 						// 根据序号检查结果决定是否转发数据包
 						// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
 						if (seq_result == 4) {
+							LOG_DBG("TRK %d: Duplicate packet seq=%d, dropped", imu_id, received_sequence);
 							break;  // 丢弃重复包
+						}
+						if (seq_result == 2) {
+							LOG_DBG("TRK %d: Out-of-order packet seq=%d, dropped", imu_id, received_sequence);
+							break;  // 丢弃乱序包，避免姿态计算错误
 						}
 
 						// 其他情况（正常、丢包、重启）都转发数据包
