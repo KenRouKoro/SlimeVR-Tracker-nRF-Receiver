@@ -356,6 +356,14 @@ void event_handler(struct esb_evt const* event) {
 				return;
 			}
 			switch (rx_payload.length) {
+				case 1: // ACK packet
+					LOG_DBG(
+						"RX ACK len=%u pipe=%u data=%02X",
+						rx_payload.length,
+						rx_payload.pipe,
+						rx_payload.data[0]
+					);
+					break;
 				case 8: {
 					struct pairing_event evt = {0};
 					memcpy(evt.packet, rx_payload.data, sizeof(evt.packet));
@@ -409,15 +417,9 @@ void event_handler(struct esb_evt const* event) {
 										| ((uint32_t)rx_payload.data[4] << 16)
 										| ((uint32_t)rx_payload.data[5] << 8)
 										| ((uint32_t)rx_payload.data[6]);
-						uint8_t ping_ack_flag = rx_payload.data[7];  // 追踪器回显的命令确认
+						uint8_t ping_ack_flag = rx_payload.data[7];
 
-						if (tracker_id >= MAX_TRACKERS) {
-							LOG_ERR("Invalid tracker_id %u in PING", tracker_id);
-							break;
-						}
-
-						// 验证pipe和tracker_id是否匹配
-						if (rx_payload.pipe != tracker_id) {
+						if (rx_payload.pipe != tracker_id % 8) {
 							LOG_WRN(
 								"PING pipe mismatch: id=%u but pipe=%u",
 								tracker_id,
@@ -428,7 +430,9 @@ void event_handler(struct esb_evt const* event) {
 						// check crc for PING
 						uint8_t crc_calc = crc8_ccitt(0x07, rx_payload.data, ESB_PING_LEN - 1);
 						if (rx_payload.data[ESB_PING_LEN - 1] != crc_calc) {
-							LOG_WRN("PING CRC mismatch");
+							LOG_WRN("PING CRC mismatch: expected %02X but got %02X",
+								crc_calc,
+								rx_payload.data[ESB_PING_LEN - 1]);
 							break;
 						}
 
@@ -451,19 +455,18 @@ void event_handler(struct esb_evt const* event) {
 						// 每个PING事件都有自己独立的PONG payload
 						struct esb_payload pong = {
 							.noack = false,
-							.pipe = tracker_id,  // ACK payload的pipe必须匹配tracker_id
+							.pipe = tracker_id % 8,
 							.length = ESB_PONG_LEN
 						};
 
 						pong.data[0] = ESB_PONG_TYPE;
 						pong.data[1] = tracker_id;
-						pong.data[2] = counter++;
+						pong.data[2] = counter;
 						pong.data[3] = (t_lo >> 24) & 0xFF;
 						pong.data[4] = (t_lo >> 16) & 0xFF;
 						pong.data[5] = (t_lo >> 8) & 0xFF;
 						pong.data[6] = (t_lo) & 0xFF;
 						pong.data[7] = tracker_remote_command[tracker_id];
-						// 不再立即清除命令标志，等待追踪器在下次PING中确认
 						uint32_t rxt = (uint32_t)k_uptime_get();
 						pong.data[8] = (rxt >> 24) & 0xFF;
 						pong.data[9] = (rxt >> 16) & 0xFF;
@@ -471,17 +474,14 @@ void event_handler(struct esb_evt const* event) {
 						pong.data[11] = (rxt) & 0xFF;
 						pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
 
-						// 设置ACK payload PONG
 						int werr = esb_write_payload(&pong);
 						if (werr == 0) {
-							// 在手动模式下，需要启动TX来发送ACK payload
-							esb_start_tx();
 							ack_statistics.sent_pongs++;
 							LOG_DBG(
 								"ACK payload set and started: PONG id=%u ctr=%u pipe=%u cmd=0x%02X",
 								tracker_id,
 								counter,
-								rx_payload.pipe,
+								pong.pipe,
 								tracker_remote_command[tracker_id]
 							);
 						} else {
@@ -727,7 +727,7 @@ int esb_initialize(bool tx) {
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = retransmit_delay_with_jitter;
 		// config.retransmit_count = 3;
-		config.tx_mode = ESB_TXMODE_MANUAL;
+		// config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
 		// config.use_fast_ramp_up = true;
