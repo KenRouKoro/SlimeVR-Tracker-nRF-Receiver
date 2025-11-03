@@ -187,9 +187,28 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 		return 4;  // 重复包
 	}
 
-	// 向前跳跃（包括跨 255→0 的回环），统一视为丢包并前移窗口
-	// 这样单一追踪器的流不会被误判为“重启”，避免大跨度导致错误重置
-	if (diff_forward > 0) {
+	// 检测大跳跃（可能是重启）
+	// 如果跳跃超过128（序号空间的一半），很可能是追踪器重启或回环
+	// 在这种情况下，不应该累加大量的gaps
+	if (diff_forward > 128) {
+		// 这是一个大跳跃，视为追踪器重启
+		stats->total_received++;
+		stats->restart_events++;
+		last_packet_sequence[tracker_id] = received_seq;
+		packet_count[tracker_id]++;
+		stats->last_sequence = received_seq;
+		LOG_DBG(
+			"Tracker restart detected: tracker=%d, last_seq=%d, new_seq=%d, jump=%d",
+			tracker_id,
+			last_seq,
+			received_seq,
+			diff_forward
+		);
+		return 3;  // 重启事件
+	}
+
+	// 向前跳跃（正常丢包范围）
+	if (diff_forward > 0 && diff_forward <= 128) {
 		stats->total_received++;
 		stats->gap_events++;
 		stats->total_gaps += (diff_forward - 1);  // 估计丢失的包数
