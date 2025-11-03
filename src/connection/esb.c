@@ -350,299 +350,304 @@ void event_handler(struct esb_evt const* event) {
 			LOG_WRN("TX FAILED");
 			break;
 		case ESB_EVENT_RX_RECEIVED:
-			int err = esb_read_rx_payload(&rx_payload);
- 			if (err) {
-				LOG_ERR("Error while reading rx packet: %d", err);
-				return;
-			}
-			switch (rx_payload.length) {
-				case 1: // ACK packet
-					LOG_DBG(
-						"RX ACK len=%u pipe=%u data=%02X",
-						rx_payload.length,
-						rx_payload.pipe,
-						rx_payload.data[0]
-					);
-					break;
-				case 8: {
-					struct pairing_event evt = {0};
-					memcpy(evt.packet, rx_payload.data, sizeof(evt.packet));
-					LOG_DBG("rx: %16llX", *(uint64_t*)evt.packet);
-					int q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
-					if (q_err) {
-						struct pairing_event discarded;
-						if (k_msgq_get(&esb_pairing_msgq, &discarded, K_NO_WAIT)
-							== 0) {
-							q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
-						}
+			int err = 0;
+			while (!err) {
+				err = esb_read_rx_payload(&rx_payload);
+				if (err == -ENODATA)
+				{
+					return;
+				} else if (err) {
+					LOG_ERR("Error while reading rx packet: %d", err);
+					return;
+				}
+				switch (rx_payload.length) {
+					case 1: // ACK packet
+						LOG_DBG(
+							"RX ACK len=%u pipe=%u data=%02X",
+							rx_payload.length,
+							rx_payload.pipe,
+							rx_payload.data[0]
+						);
+						break;
+					case 8: {
+						struct pairing_event evt = {0};
+						memcpy(evt.packet, rx_payload.data, sizeof(evt.packet));
+						LOG_DBG("rx: %16llX", *(uint64_t*)evt.packet);
+						int q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
 						if (q_err) {
-							LOG_WRN(
-								"ACK queue full, dropping packet type %u",
-								evt.packet[1]
-							);
-						}
-					}
-					switch (evt.packet[1]) {
-						case 1:  // receives ack generated from last packet
-							LOG_DBG("RX Pairing Sent ACK");
-							break;
-						case 2:  // should "acknowledge" pairing data sent from
-									// receiver
-							LOG_DBG("RX Pairing ACK Receiver");
-							break;
-						case 0:
-							LOG_INF("RX Pairing Request");
-							break;
-						default:
-							LOG_WRN(
-								"Unexpected pairing packet type %u",
-								evt.packet[1]
-							);
-							break;
-					}
-					break;
-				} break;
-				case ESB_PING_LEN: {
-					LOG_DBG(
-						"Received PING type=%u id=%u ctr=%u",
-						rx_payload.data[0],
-						rx_payload.data[1],
-						rx_payload.data[2]
-					);
-					// Check for PING control packet and respond with PONG
-					if (rx_payload.data[0] == ESB_PING_TYPE) {
-						uint8_t tracker_id = rx_payload.data[1];
-						uint8_t counter = rx_payload.data[2];
-						uint32_t t_lo = ((uint32_t)rx_payload.data[3] << 24)
-										| ((uint32_t)rx_payload.data[4] << 16)
-										| ((uint32_t)rx_payload.data[5] << 8)
-										| ((uint32_t)rx_payload.data[6]);
-						uint8_t ping_ack_flag = rx_payload.data[7];
-
-						if (rx_payload.pipe != tracker_id % 8) {
-							LOG_WRN(
-								"PING pipe mismatch: id=%u but pipe=%u",
-								tracker_id,
-								rx_payload.pipe
-							);
-						}
-
-						// check crc for PING
-						uint8_t crc_calc = crc8_ccitt(0x07, rx_payload.data, ESB_PING_LEN - 1);
-						if (rx_payload.data[ESB_PING_LEN - 1] != crc_calc) {
-							LOG_WRN("PING CRC mismatch: expected %02X but got %02X",
-								crc_calc,
-								rx_payload.data[ESB_PING_LEN - 1]);
-							break;
-						}
-
-						ack_statistics.total_pings++;
-
-						// 检查追踪器是否确认收到了命令
-						if (ping_ack_flag != ESB_PONG_FLAG_NORMAL) {
-							// 追踪器已确认收到命令，清除本地命令标志
-							if (tracker_remote_command[tracker_id] == ping_ack_flag) {
-								tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
-								LOG_DBG(
-									"Tracker %u confirmed command 0x%02X, clearing flag",
-									tracker_id,
-									ping_ack_flag
+							struct pairing_event discarded;
+							if (k_msgq_get(&esb_pairing_msgq, &discarded, K_NO_WAIT)
+								== 0) {
+								q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
+							}
+							if (q_err) {
+								LOG_WRN(
+									"ACK queue full, dropping packet type %u",
+									evt.packet[1]
 								);
 							}
 						}
-
-						// 在ISR中使用栈上的局部变量构建PONG，避免全局变量的数据竞争
-						// 每个PING事件都有自己独立的PONG payload
-						struct esb_payload pong = {
-							.noack = false,
-							.pipe = tracker_id % 8,
-							.length = ESB_PONG_LEN
-						};
-
-						pong.data[0] = ESB_PONG_TYPE;
-						pong.data[1] = tracker_id;
-						pong.data[2] = counter;
-						pong.data[3] = (t_lo >> 24) & 0xFF;
-						pong.data[4] = (t_lo >> 16) & 0xFF;
-						pong.data[5] = (t_lo >> 8) & 0xFF;
-						pong.data[6] = (t_lo) & 0xFF;
-						pong.data[7] = tracker_remote_command[tracker_id];
-						uint32_t rxt = (uint32_t)k_uptime_get();
-						pong.data[8] = (rxt >> 24) & 0xFF;
-						pong.data[9] = (rxt >> 16) & 0xFF;
-						pong.data[10] = (rxt >> 8) & 0xFF;
-						pong.data[11] = (rxt) & 0xFF;
-						pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
-
-						int werr = esb_write_payload(&pong);
-						if (werr == 0) {
-							ack_statistics.sent_pongs++;
-							LOG_DBG(
-								"ACK payload set and started: PONG id=%u ctr=%u pipe=%u cmd=0x%02X",
-								tracker_id,
-								counter,
-								pong.pipe,
-								tracker_remote_command[tracker_id]
-							);
-						} else {
-							ack_statistics.failed_pongs++;
-							LOG_ERR(
-								"Failed to set ACK payload PONG id=%u: %d",
-								tracker_id,
-								werr
-							);
+						switch (evt.packet[1]) {
+							case 1:  // receives ack generated from last packet
+								LOG_DBG("RX Pairing Sent ACK");
+								break;
+							case 2:  // should "acknowledge" pairing data sent from
+										// receiver
+								LOG_DBG("RX Pairing ACK Receiver");
+								break;
+							case 0:
+								LOG_INF("RX Pairing Request");
+								break;
+							default:
+								LOG_WRN(
+									"Unexpected pairing packet type %u",
+									evt.packet[1]
+								);
+								break;
 						}
-					}
-				} break;
-				case 21:  // 16 bytes data + 4 bytes CRC32 + 1 byte sequence number
-				{
-					uint32_t crc_check
-						= crc32_k_4_2_update(0x93a409eb, rx_payload.data, 16);
-					uint32_t* crc_ptr = (uint32_t*)&rx_payload.data[16];
-					if (*crc_ptr != crc_check) {
-						LOG_ERR(
-							"Incorrect checksum, computed %08X, received %08X",
-							crc_check,
-							*crc_ptr
+						break;
+					} break;
+					case ESB_PING_LEN: {
+						LOG_DBG(
+							"Received PING type=%u id=%u ctr=%u",
+							rx_payload.data[0],
+							rx_payload.data[1],
+							rx_payload.data[2]
 						);
-						printk(
-							"%08llx%016llX%016llX\n",
-							*(uint64_t*)&rx_payload.data[16] & 0XFFFFFFFF,
-							*(uint64_t*)&rx_payload.data[8],
-							*(uint64_t*)rx_payload.data
-						);
-						break;
-					}
+						// Check for PING control packet and respond with PONG
+						if (rx_payload.data[0] == ESB_PING_TYPE) {
+							uint8_t tracker_id = rx_payload.data[1];
+							uint8_t counter = rx_payload.data[2];
+							uint32_t t_lo = ((uint32_t)rx_payload.data[3] << 24)
+											| ((uint32_t)rx_payload.data[4] << 16)
+											| ((uint32_t)rx_payload.data[5] << 8)
+											| ((uint32_t)rx_payload.data[6]);
+							uint8_t ping_ack_flag = rx_payload.data[7];
 
-					uint8_t imu_id = rx_payload.data[1];
-					if (imu_id >= stored_trackers) {  // not a stored tracker
-						return;
-					}
-					if (discovered_trackers[imu_id]
-						< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
-												// tracker
+							if (rx_payload.pipe != tracker_id % 8) {
+								LOG_WRN(
+									"PING pipe mismatch: id=%u but pipe=%u",
+									tracker_id,
+									rx_payload.pipe
+								);
+							}
+
+							// check crc for PING
+							uint8_t crc_calc = crc8_ccitt(0x07, rx_payload.data, ESB_PING_LEN - 1);
+							if (rx_payload.data[ESB_PING_LEN - 1] != crc_calc) {
+								LOG_WRN("PING CRC mismatch: expected %02X but got %02X",
+									crc_calc,
+									rx_payload.data[ESB_PING_LEN - 1]);
+								break;
+							}
+
+							ack_statistics.total_pings++;
+
+							// 检查追踪器是否确认收到了命令
+							if (ping_ack_flag != ESB_PONG_FLAG_NORMAL) {
+								// 追踪器已确认收到命令，清除本地命令标志
+								if (tracker_remote_command[tracker_id] == ping_ack_flag) {
+									tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
+									LOG_DBG(
+										"Tracker %u confirmed command 0x%02X, clearing flag",
+										tracker_id,
+										ping_ack_flag
+									);
+								}
+							}
+
+							// 在ISR中使用栈上的局部变量构建PONG，避免全局变量的数据竞争
+							// 每个PING事件都有自己独立的PONG payload
+							struct esb_payload pong = {
+								.noack = false,
+								.pipe = tracker_id % 8,
+								.length = ESB_PONG_LEN
+							};
+
+							pong.data[0] = ESB_PONG_TYPE;
+							pong.data[1] = tracker_id;
+							pong.data[2] = counter;
+							pong.data[3] = (t_lo >> 24) & 0xFF;
+							pong.data[4] = (t_lo >> 16) & 0xFF;
+							pong.data[5] = (t_lo >> 8) & 0xFF;
+							pong.data[6] = (t_lo) & 0xFF;
+							pong.data[7] = tracker_remote_command[tracker_id];
+							uint32_t rxt = (uint32_t)k_uptime_get();
+							pong.data[8] = (rxt >> 24) & 0xFF;
+							pong.data[9] = (rxt >> 16) & 0xFF;
+							pong.data[10] = (rxt >> 8) & 0xFF;
+							pong.data[11] = (rxt) & 0xFF;
+							pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
+
+							int werr = esb_write_payload(&pong);
+							if (werr == 0) {
+								ack_statistics.sent_pongs++;
+								LOG_DBG(
+									"ACK payload set and started: PONG id=%u ctr=%u pipe=%u cmd=0x%02X",
+									tracker_id,
+									counter,
+									pong.pipe,
+									tracker_remote_command[tracker_id]
+								);
+							} else {
+								ack_statistics.failed_pongs++;
+								LOG_ERR(
+									"Failed to set ACK payload PONG id=%u: %d",
+									tracker_id,
+									werr
+								);
+							}
+						}
+					} break;
+					case 21:  // 16 bytes data + 4 bytes CRC32 + 1 byte sequence number
 					{
-						discovered_trackers[imu_id]++;
-						return;
-					}
-					if (rx_payload.data[0] > 223) {  // reserved for receiver only
-						break;
-					}
+						uint32_t crc_check
+							= crc32_k_4_2_update(0x93a409eb, rx_payload.data, 16);
+						uint32_t* crc_ptr = (uint32_t*)&rx_payload.data[16];
+						if (*crc_ptr != crc_check) {
+							LOG_ERR(
+								"Incorrect checksum, computed %08X, received %08X",
+								crc_check,
+								*crc_ptr
+							);
+							printk(
+								"%08llx%016llX%016llX\n",
+								*(uint64_t*)&rx_payload.data[16] & 0XFFFFFFFF,
+								*(uint64_t*)&rx_payload.data[8],
+								*(uint64_t*)rx_payload.data
+							);
+							break;
+						}
 
-					// 智能验证包序号
-					uint8_t received_sequence = rx_payload.data[20];
-					int seq_result
-						= check_packet_sequence(imu_id, received_sequence);
+						uint8_t imu_id = rx_payload.data[1];
+						if (imu_id >= stored_trackers) {  // not a stored tracker
+							return;
+						}
+						if (discovered_trackers[imu_id]
+							< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
+													// tracker
+						{
+							discovered_trackers[imu_id]++;
+							return;
+						}
+						if (rx_payload.data[0] > 223) {  // reserved for receiver only
+							break;
+						}
 
-					// 根据序号检查结果决定是否转发数据包
-					// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
-					if (seq_result == 4) {
-						break;  // 丢弃重复包
-					}
+						// 智能验证包序号
+						uint8_t received_sequence = rx_payload.data[20];
+						int seq_result
+							= check_packet_sequence(imu_id, received_sequence);
 
-					hid_write_packet_n(
-						rx_payload.data,
-						rx_payload.rssi
-					);  // write to hid endpoint
-				} break;
-				case 20:  // has crc32 (legacy format without sequence number)
-				{
-					uint32_t crc_check
-						= crc32_k_4_2_update(0x93a409eb, rx_payload.data, 16);
-					uint32_t* crc_ptr = (uint32_t*)&rx_payload.data[16];
-					if (*crc_ptr != crc_check) {
-						LOG_ERR(
-							"Incorrect checksum, computed %08X, received %08X",
-							crc_check,
-							*crc_ptr
-						);
-						printk(
-							"%08llx%016llX%016llX\n",
-							*(uint64_t*)&rx_payload.data[16] & 0XFFFFFFFF,
-							*(uint64_t*)&rx_payload.data[8],
-							*(uint64_t*)rx_payload.data
-						);
-						break;
-					}
+						// 根据序号检查结果决定是否转发数据包
+						// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
+						if (seq_result == 4) {
+							break;  // 丢弃重复包
+						}
 
-					uint8_t imu_id = rx_payload.data[1];
-					if (imu_id >= stored_trackers) {  // not a stored tracker
-						return;
-					}
-					if (discovered_trackers[imu_id]
-						< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
-												// tracker
+						hid_write_packet_n(
+							rx_payload.data,
+							rx_payload.rssi
+						);  // write to hid endpoint
+					} break;
+					case 20:  // has crc32 (legacy format without sequence number)
 					{
-						discovered_trackers[imu_id]++;
-						return;
-					}
-					if (rx_payload.data[0] > 223) {  // reserved for receiver only
-						break;
-					}
-					hid_write_packet_n(
-						rx_payload.data,
-						rx_payload.rssi
-					);  // write to hid endpoint
-				} break;
-				case 17:  // 16 bytes data + 1 byte sequence number
-				{
-					uint8_t imu_id = rx_payload.data[1];
-					if (imu_id >= stored_trackers) {  // not a stored tracker
-						return;
-					}
-					if (discovered_trackers[imu_id]
-						< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
-												// tracker
+						uint32_t crc_check
+							= crc32_k_4_2_update(0x93a409eb, rx_payload.data, 16);
+						uint32_t* crc_ptr = (uint32_t*)&rx_payload.data[16];
+						if (*crc_ptr != crc_check) {
+							LOG_ERR(
+								"Incorrect checksum, computed %08X, received %08X",
+								crc_check,
+								*crc_ptr
+							);
+							printk(
+								"%08llx%016llX%016llX\n",
+								*(uint64_t*)&rx_payload.data[16] & 0XFFFFFFFF,
+								*(uint64_t*)&rx_payload.data[8],
+								*(uint64_t*)rx_payload.data
+							);
+							break;
+						}
+
+						uint8_t imu_id = rx_payload.data[1];
+						if (imu_id >= stored_trackers) {  // not a stored tracker
+							return;
+						}
+						if (discovered_trackers[imu_id]
+							< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
+													// tracker
+						{
+							discovered_trackers[imu_id]++;
+							return;
+						}
+						if (rx_payload.data[0] > 223) {  // reserved for receiver only
+							break;
+						}
+						hid_write_packet_n(
+							rx_payload.data,
+							rx_payload.rssi
+						);  // write to hid endpoint
+					} break;
+					case 17:  // 16 bytes data + 1 byte sequence number
 					{
-						discovered_trackers[imu_id]++;
-						return;
-					}
-					if (rx_payload.data[0] > 223) {  // reserved for receiver only
-						break;
-					}
+						uint8_t imu_id = rx_payload.data[1];
+						if (imu_id >= stored_trackers) {  // not a stored tracker
+							return;
+						}
+						if (discovered_trackers[imu_id]
+							< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
+													// tracker
+						{
+							discovered_trackers[imu_id]++;
+							return;
+						}
+						if (rx_payload.data[0] > 223) {  // reserved for receiver only
+							break;
+						}
 
-					uint8_t received_sequence = rx_payload.data[16];
-					int seq_result
-						= check_packet_sequence(imu_id, received_sequence);
+						uint8_t received_sequence = rx_payload.data[16];
+						int seq_result
+							= check_packet_sequence(imu_id, received_sequence);
 
-					// 根据序号检查结果决定是否转发数据包
-					// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
-					if (seq_result == 4) {
-						break;  // 丢弃重复包
-					}
+						// 根据序号检查结果决定是否转发数据包
+						// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
+						if (seq_result == 4) {
+							break;  // 丢弃重复包
+						}
 
-					// 其他情况（正常、丢包、重启）都转发数据包
-					hid_write_packet_n(
-						rx_payload.data,
-						rx_payload.rssi
-					);  // write to hid endpoint
-				} break;
-				case 16:  // legacy format without CRC
-				{
-					uint8_t imu_id = rx_payload.data[1];
-					if (imu_id >= stored_trackers) {  // not a stored tracker
-						return;
-					}
-					if (discovered_trackers[imu_id]
-						< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
-												// tracker
+						// 其他情况（正常、丢包、重启）都转发数据包
+						hid_write_packet_n(
+							rx_payload.data,
+							rx_payload.rssi
+						);  // write to hid endpoint
+					} break;
+					case 16:  // legacy format without CRC
 					{
-						discovered_trackers[imu_id]++;
-						return;
-					}
-					if (rx_payload.data[0] > 223) {  // reserved for receiver only
+						uint8_t imu_id = rx_payload.data[1];
+						if (imu_id >= stored_trackers) {  // not a stored tracker
+							return;
+						}
+						if (discovered_trackers[imu_id]
+							< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
+													// tracker
+						{
+							discovered_trackers[imu_id]++;
+							return;
+						}
+						if (rx_payload.data[0] > 223) {  // reserved for receiver only
+							break;
+						}
+						hid_write_packet_n(
+							rx_payload.data,
+							rx_payload.rssi
+						);  // write to hid endpoint
+					} break;
+					default:
+						LOG_ERR("Wrong packet length: %d", rx_payload.length);
 						break;
-					}
-					hid_write_packet_n(
-						rx_payload.data,
-						rx_payload.rssi
-					);  // write to hid endpoint
-				} break;
-				default:
-					LOG_ERR("Wrong packet length: %d", rx_payload.length);
-					break;
-			}
-			break;
+				}
+			}	break;
 	}
 }
 
@@ -702,7 +707,7 @@ int esb_initialize(bool tx) {
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
 
-	uint16_t jitter = (rand() % 200) - 100;  // ±100 µs
+	uint16_t jitter = (rand() % 160) - 80;
 	uint16_t retransmit_delay_with_jitter = RADIO_RETRANSMIT_DELAY + jitter;
 
 	if (tx) {
