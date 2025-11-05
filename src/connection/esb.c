@@ -520,113 +520,18 @@ void event_handler(struct esb_evt const* event) {
 							}
 						}
 					} break;
-					case 21:  // 16 bytes data + 4 bytes CRC32 + 1 byte sequence number
-					{
-						uint32_t crc_check
-							= crc32_k_4_2_update(0x93a409eb, rx_payload.data, 16);
-						uint32_t* crc_ptr = (uint32_t*)&rx_payload.data[16];
-						if (*crc_ptr != crc_check) {
-							LOG_ERR(
-								"Incorrect checksum, computed %08X, received %08X",
-								crc_check,
-								*crc_ptr
-							);
-							printk(
-								"%08llx%016llX%016llX\n",
-								*(uint64_t*)&rx_payload.data[16] & 0XFFFFFFFF,
-								*(uint64_t*)&rx_payload.data[8],
-								*(uint64_t*)rx_payload.data
-							);
-							break;
-						}
-
-						uint8_t imu_id = rx_payload.data[1];
-						if (imu_id >= stored_trackers) {  // not a stored tracker
-							return;
-						}
-						if (discovered_trackers[imu_id]
-							< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
-													// tracker
-						{
-							discovered_trackers[imu_id]++;
-							return;
-						}
-						if (rx_payload.data[0] > 223) {  // reserved for receiver only
-							break;
-						}
-
-						// 智能验证包序号
-						uint8_t received_sequence = rx_payload.data[20];
-						int seq_result
-							= check_packet_sequence(imu_id, received_sequence);
-
-						// 根据序号检查结果决定是否转发数据包
-						// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
-						if (seq_result == 4) {
-							LOG_DBG("TRK %d: Duplicate packet seq=%d, dropped", imu_id, received_sequence);
-							break;  // 丢弃重复包
-						}
-						if (seq_result == 2) {
-							LOG_DBG("TRK %d: Out-of-order packet seq=%d, dropped", imu_id, received_sequence);
-							break;  // 丢弃乱序包，避免姿态计算错误
-						}
-
-						hid_write_packet_n(
-							rx_payload.data,
-							rx_payload.rssi
-						);  // write to hid endpoint
-					} break;
-					case 20:  // has crc32 (legacy format without sequence number)
-					{
-						uint32_t crc_check
-							= crc32_k_4_2_update(0x93a409eb, rx_payload.data, 16);
-						uint32_t* crc_ptr = (uint32_t*)&rx_payload.data[16];
-						if (*crc_ptr != crc_check) {
-							LOG_ERR(
-								"Incorrect checksum, computed %08X, received %08X",
-								crc_check,
-								*crc_ptr
-							);
-							printk(
-								"%08llx%016llX%016llX\n",
-								*(uint64_t*)&rx_payload.data[16] & 0XFFFFFFFF,
-								*(uint64_t*)&rx_payload.data[8],
-								*(uint64_t*)rx_payload.data
-							);
-							break;
-						}
-
-						uint8_t imu_id = rx_payload.data[1];
-						if (imu_id >= stored_trackers) {  // not a stored tracker
-							return;
-						}
-						if (discovered_trackers[imu_id]
-							< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
-													// tracker
-						{
-							discovered_trackers[imu_id]++;
-							return;
-						}
-						if (rx_payload.data[0] > 223) {  // reserved for receiver only
-							break;
-						}
-						hid_write_packet_n(
-							rx_payload.data,
-							rx_payload.rssi
-						);  // write to hid endpoint
-					} break;
 					case 17:  // 16 bytes data + 1 byte sequence number
 					{
 						uint8_t imu_id = rx_payload.data[1];
 						if (imu_id >= stored_trackers) {  // not a stored tracker
-							return;
+							continue;
 						}
 						if (discovered_trackers[imu_id]
 							< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
 													// tracker
 						{
 							discovered_trackers[imu_id]++;
-							return;
+							continue;
 						}
 						if (rx_payload.data[0] > 223) {  // reserved for receiver only
 							break;
@@ -653,18 +558,18 @@ void event_handler(struct esb_evt const* event) {
 							rx_payload.rssi
 						);  // write to hid endpoint
 					} break;
-					case 16:  // legacy format without CRC
+					case 16:  // legacy format without sequence number
 					{
 						uint8_t imu_id = rx_payload.data[1];
 						if (imu_id >= stored_trackers) {  // not a stored tracker
-							return;
+							continue;
 						}
 						if (discovered_trackers[imu_id]
 							< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
 													// tracker
 						{
 							discovered_trackers[imu_id]++;
-							return;
+							continue;
 						}
 						if (rx_payload.data[0] > 223) {  // reserved for receiver only
 							break;
