@@ -368,6 +368,7 @@ void event_handler(struct esb_evt const* event) {
 			LOG_DBG("TX SUCCESS");
 			break;
 		case ESB_EVENT_TX_FAILED:
+			esb_pop_tx();
 			LOG_WRN("TX FAILED");
 			break;
 		case ESB_EVENT_RX_RECEIVED:
@@ -510,7 +511,16 @@ void event_handler(struct esb_evt const* event) {
 									pong.pipe,
 									tracker_remote_command[tracker_id]
 								);
-							} else {
+							} else if (werr == -12) {
+								esb_flush_tx();
+								ack_statistics.failed_pongs++;
+								LOG_ERR(
+									"Failed to set ACK payload PONG id=%u: %d",
+									tracker_id,
+									werr
+								);
+							}
+							else {
 								ack_statistics.failed_pongs++;
 								LOG_ERR(
 									"Failed to set ACK payload PONG id=%u: %d",
