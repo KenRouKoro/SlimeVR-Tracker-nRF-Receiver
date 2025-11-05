@@ -212,6 +212,22 @@ static void print_list(void)
 
 static void console_thread(void)
 {
+#if DFU_EXISTS
+	if (button_read()) // button held on usb connect, enter DFU
+	{
+#if ADAFRUIT_BOOTLOADER
+			NRF_POWER->GPREGRET = 0x57;
+			k_msleep(100); // Wait for register to be written
+			sys_reboot(SYS_REBOOT_COLD);
+#endif
+#if NRF5_BOOTLOADER
+			gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
+			k_msleep(100); // Wait for GPIO to be configured
+			sys_reboot(SYS_REBOOT_COLD);
+#endif
+	}
+#endif
+
 	console_getline_init();
 
 	// Wait for any pending log data to be processed
