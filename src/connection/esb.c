@@ -112,7 +112,7 @@ K_THREAD_DEFINE(
 );
 
 static void esb_thread(void);
-K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 5, 0, 0);
+K_THREAD_DEFINE(esb_thread_id, 2048, esb_thread, NULL, NULL, NULL, 5, 0, 0);
 
 static bool esb_parse_pair(const uint8_t packet[8]);
 
@@ -519,14 +519,17 @@ void event_handler(struct esb_evt const* event) {
 									tracker_id,
 									werr
 								);
+								esb_write_payload(&pong);
 							}
 							else {
+								esb_pop_tx();
 								ack_statistics.failed_pongs++;
 								LOG_ERR(
 									"Failed to set ACK payload PONG id=%u: %d",
 									tracker_id,
 									werr
 								);
+								esb_write_payload(&pong);
 							}
 						}
 					} break;
