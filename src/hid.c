@@ -36,7 +36,7 @@ static struct tracker_report {
 	.data = {0}
 };;
 
-struct tracker_report reports[MAX_TRACKERS * sizeof(struct tracker_report)];
+struct tracker_report reports[MAX_TRACKERS];
 atomic_t report_write_index = 0;
 atomic_t report_read_index = 0;
 // read_index == write_index -> empty fifo
@@ -70,15 +70,20 @@ struct rssi_ema_state {
 static struct rssi_ema_state rssi_states[MAX_TRACKERS] = {0};
 
 struct hid_stats_state {
-	uint32_t reports_in_interval;
-	uint32_t current_tps;
-	int64_t last_tps_time;
-	int64_t last_report_time;
-	bool had_activity;
+	atomic_t reports_in_interval;
+	atomic_t current_tps;
+	atomic_t last_tps_time;
+	atomic_t last_report_time;
+	atomic_t had_activity;
 };
 
-static struct hid_stats_state hid_stats;
-static K_MUTEX_DEFINE(hid_stats_lock);
+static struct hid_stats_state hid_stats = {
+	.reports_in_interval = ATOMIC_INIT(0),
+	.current_tps = ATOMIC_INIT(0),
+	.last_tps_time = ATOMIC_INIT(0),
+	.last_report_time = ATOMIC_INIT(0),
+	.had_activity = ATOMIC_INIT(0)
+};
 
 LOG_MODULE_REGISTER(hid_event, LOG_LEVEL_INF);
 
@@ -115,58 +120,52 @@ static void hid_stats_record_reports(uint32_t reports)
 
 	int64_t now = k_uptime_get();
 
-	k_mutex_lock(&hid_stats_lock, K_FOREVER);
-
-	if (hid_stats.last_tps_time == 0)
-		hid_stats.last_tps_time = now;
-
-	hid_stats.reports_in_interval += reports;
-	hid_stats.last_report_time = now;
-	hid_stats.had_activity = true;
-
-	if (now - hid_stats.last_tps_time >= HID_TPS_UPDATE_INTERVAL_MS) {
-		hid_stats.current_tps = hid_stats.reports_in_interval;
-		hid_stats.reports_in_interval = 0;
-		hid_stats.last_tps_time = now;
+	atomic_val_t last_tps = atomic_get(&hid_stats.last_tps_time);
+	if (last_tps == 0) {
+		atomic_cas(&hid_stats.last_tps_time, 0, now);
 	}
 
-	k_mutex_unlock(&hid_stats_lock);
+	atomic_add(&hid_stats.reports_in_interval, (atomic_val_t)reports);
+	atomic_set(&hid_stats.last_report_time, now);
+	atomic_set(&hid_stats.had_activity, 1);
+
+	last_tps = atomic_get(&hid_stats.last_tps_time);
+	if (now - last_tps >= HID_TPS_UPDATE_INTERVAL_MS) {
+		atomic_val_t interval_reports = atomic_set(&hid_stats.reports_in_interval, 0);
+		atomic_set(&hid_stats.current_tps, interval_reports);
+		atomic_set(&hid_stats.last_tps_time, now);
+	}
 }
 
 static void hid_stats_update_idle_if_needed(int64_t now)
 {
-	k_mutex_lock(&hid_stats_lock, K_FOREVER);
-
-	if (hid_stats.last_tps_time == 0) {
-		k_mutex_unlock(&hid_stats_lock);
+	atomic_val_t last_tps = atomic_get(&hid_stats.last_tps_time);
+	if (last_tps == 0) {
 		return;
 	}
 
-	if (now - hid_stats.last_tps_time >= HID_TPS_UPDATE_INTERVAL_MS) {
-		if (hid_stats.reports_in_interval > 0U) {
-			hid_stats.current_tps = hid_stats.reports_in_interval;
-			hid_stats.reports_in_interval = 0;
-		} else if (hid_stats.last_report_time &&
-			   now - hid_stats.last_report_time >= HID_TPS_UPDATE_INTERVAL_MS) {
-			hid_stats.current_tps = 0;
+	if (now - last_tps >= HID_TPS_UPDATE_INTERVAL_MS) {
+		atomic_val_t interval_reports = atomic_get(&hid_stats.reports_in_interval);
+		if (interval_reports > 0) {
+			atomic_set(&hid_stats.current_tps, interval_reports);
+			atomic_set(&hid_stats.reports_in_interval, 0);
+		} else {
+			atomic_val_t last_report = atomic_get(&hid_stats.last_report_time);
+			if (last_report && now - last_report >= HID_TPS_UPDATE_INTERVAL_MS) {
+				atomic_set(&hid_stats.current_tps, 0);
+			}
 		}
-		hid_stats.last_tps_time = now;
+		atomic_set(&hid_stats.last_tps_time, now);
 	}
-
-	k_mutex_unlock(&hid_stats_lock);
 }
 
 static uint32_t hid_stats_snapshot(bool *had_activity)
 {
-	uint32_t current_tps;
+	uint32_t current_tps = (uint32_t)atomic_get(&hid_stats.current_tps);
 
-	k_mutex_lock(&hid_stats_lock, K_FOREVER);
-	current_tps = hid_stats.current_tps;
 	if (had_activity) {
-		*had_activity = hid_stats.had_activity;
-		hid_stats.had_activity = false;
+		*had_activity = (bool)atomic_set(&hid_stats.had_activity, 0);
 	}
-	k_mutex_unlock(&hid_stats_lock);
 
 	return current_tps;
 }
@@ -297,7 +296,7 @@ uint32_t hid_get_current_tps(void)
 static uint8_t rssi_smooth_update(uint8_t tracker_id, int8_t new_rssi)
 {
 	if (tracker_id >= MAX_TRACKERS) {
-		return (uint8_t)new_rssi;  // 超出范围，返回原始值
+		return (uint8_t)new_rssi;
 	}
 
 	struct rssi_ema_state *state = &rssi_states[tracker_id];
@@ -339,7 +338,7 @@ void hid_reset_all_rssi_smooth(void)
 	}
 }
 
-K_THREAD_DEFINE(hid_dropped_reports_logging_thread, 256, hid_dropped_reports_logging, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(hid_dropped_reports_logging_thread, 256, hid_dropped_reports_logging, NULL, NULL, NULL, 7, 0, 0);
 
 static void int_in_ready_cb(const struct device *dev)
 {
@@ -458,7 +457,6 @@ void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 
 	if (data[0] != 1 && data[0] != 4) { // packet 1 and 4 are full precision quat and accel/mag, no room for rssi
 		uint8_t tracker_id = data[1];
-		// 对RSSI值进行平滑处理
 		uint8_t smoothed_rssi = rssi_smooth_update(tracker_id, (int8_t)rssi);
 		report.data[15] = smoothed_rssi;
 	}
