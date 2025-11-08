@@ -12,6 +12,8 @@
 // 0-15 -> id 3-18
 // 0-255 -> id 3-258
 
+#define RF_CHANNEL 259  // NVS key for receiver RF channel
+
 uint8_t reboot_counter_read(void);
 void reboot_counter_write(uint8_t reboot_counter);
 

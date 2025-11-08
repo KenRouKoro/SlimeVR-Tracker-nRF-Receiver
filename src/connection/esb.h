@@ -43,7 +43,9 @@
 #define ESB_PONG_FLAG_REBOOT 0x07           // Reboot tracker
 #define ESB_PONG_FLAG_CLEAR 0x08            // Clear pairing data
 #define ESB_PONG_FLAG_DFU 0x09              // Enter DFU bootloader
-// Reserved for future use: 0x0A-0xFF
+#define ESB_PONG_FLAG_SET_CHANNEL 0x0A      // Set RF channel (data[8-11] contains channel value)
+#define ESB_PONG_FLAG_CLEAR_CHANNEL 0x0B    // Clear RF channel setting (restore default)
+// Reserved for future use: 0x0C-0xFF
 
 void event_handler(struct esb_evt const* event);
 int clocks_start(void);
@@ -69,6 +71,12 @@ void esb_receive(void);
 // Remote command API
 void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
 void esb_send_remote_command_all(uint8_t command_flag);
+void esb_set_all_trackers_channel(uint8_t channel);  // Set RF channel for all trackers
+void esb_clear_all_trackers_channel(void);  // Clear RF channel setting (restore default)
+
+// Local receiver channel management
+void esb_set_receiver_channel(uint8_t channel);  // Set receiver RF channel only (local)
+void esb_clear_receiver_channel(void);  // Clear receiver RF channel (restore default, local)
 
 // Convenience wrappers for specific commands
 static inline void esb_request_tracker_shutdown(uint8_t tracker_id) {

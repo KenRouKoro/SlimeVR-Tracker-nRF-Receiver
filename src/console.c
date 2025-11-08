@@ -157,49 +157,67 @@ static void print_meow(void)
 
 static void print_help(void)
 {
-	printk("\n=== Available Commands ===\n\n");
-	printk("Device Information:\n");
-	printk("  info                       Get device information\n");
-	printk("  uptime                     Get device uptime\n");
-	printk("  list                       Get paired devices\n");
-	printk("\n");
-	printk("Device Management:\n");
-	printk("  reboot                     Soft reset the device\n");
-	printk("  add <address>              Manually add a device\n");
-	printk("  remove                     Remove last device\n");
-	printk("  pair                       Enter pairing mode\n");
-	printk("  exit                       Exit pairing mode\n");
-	printk("  clear                      Clear stored devices\n");
-	printk("\n");
-	printk("Statistics:\n");
-	printk("  stats                      Show packet statistics\n");
-	printk("  resetstats                 Reset packet statistics\n");
-	printk("\n");
-	printk("Remote Commands:\n");
-	printk("  send <id|all> <command>    Send remote command to tracker(s)\n");
-	printk("    Commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu\n");
-	printk("    Examples:\n");
-	printk("      send 0 shutdown          Shutdown tracker 0\n");
-	printk("      send all calibrate       Calibrate all trackers\n");
-	printk("      send 1 meow              Make tracker 1 meow\n");
-	printk("      send 2 reboot            Reboot tracker 2\n");
-	printk("      send 3 clear             Clear pairing on tracker 3\n");
-	printk("      send all dfu             Enter DFU mode on all trackers\n");
-	printk("\n");
+	printk("\n=== Available Commands ===\n\n"
+	       "Device Information:\n"
+	       "  info                       Get device information\n"
+	       "  uptime                     Get device uptime\n"
+	       "  list                       Get paired devices\n"
+	       "\n");
+
+	printk("Device Management:\n"
+	       "  reboot                     Soft reset the device\n"
+	       "  add <address>              Manually add a device\n"
+	       "  remove                     Remove last device\n"
+	       "  pair                       Enter pairing mode\n"
+	       "  exit                       Exit pairing mode\n"
+	       "  clear                      Clear stored devices\n"
+	       "\n");
+
+	printk("Statistics:\n"
+	       "  stats                      Show packet statistics\n"
+	       "  resetstats                 Reset packet statistics\n"
+	       "\n");
+
+	printk("RF Channel (Local Receiver):\n"
+	       "  channel <0-100>            Set receiver RF channel only\n"
+	       "    Example: channel 25       Set receiver to channel 25\n"
+	       "  clearchannel               Clear receiver RF channel (use default)\n"
+	       "\n");
+
+	printk("Remote Commands:\n"
+	       "  send <id|all> <command>    Send remote command to tracker(s)\n"
+	       "    Commands: shutdown, calibrate, 6-side, meow, scan, mag,\n"
+	       "              reboot, clear, dfu, channel <0-100>, clearchannel\n");
+
+	printk("    Examples:\n"
+	       "      send 0 shutdown          Shutdown tracker 0\n"
+	       "      send all calibrate       Calibrate all trackers\n"
+	       "      send 1 meow              Make tracker 1 meow\n"
+	       "      send 2 reboot            Reboot tracker 2\n");
+
+	printk("      send 3 clear             Clear pairing on tracker 3\n"
+	       "      send all dfu             Enter DFU mode on all trackers\n"
+	       "      send all channel 25      Set all trackers to channel 25\n"
+	       "      send all clearchannel    Clear channel for all trackers\n"
+	       "\n");
+
 #if DFU_EXISTS
-	printk("Bootloader:\n");
-	printk("  dfu                        Enter DFU bootloader\n");
-	printk("\n");
+	printk("Bootloader:\n"
+	       "  dfu                        Enter DFU bootloader\n"
+	       "\n");
 #endif
-	printk("Other:\n");
-	printk("  meow                       Meow!\n");
-	printk("  help                       Show this help message\n");
-	printk("\n");
-	printk("Button Functions:\n");
-	printk("  Short press (1x):          Status check\n");
-	printk("  Quick press (2x):          Exit pairing mode\n");
-	printk("  Quick press (3x):          Enter pairing mode\n");
-	printk("  Long press (5s):           Clear all pairings\n");
+
+	printk("Other:\n"
+	       "  meow                       Meow!\n"
+	       "  help                       Show this help message\n"
+	       "\n");
+
+	printk("Button Functions:\n"
+	       "  Short press (1x):          Status check\n"
+	       "  Quick press (2x):          Exit pairing mode\n"
+	       "  Quick press (3x):          Enter pairing mode\n"
+	       "  Long press (5s):           Clear all pairings\n");
+
 #if DFU_EXISTS
 	printk("  Long press (10s):          Enter DFU mode\n");
 #endif
@@ -270,6 +288,8 @@ static void console_thread(void)
 	uint8_t command_clear[] = "clear";
 	uint8_t command_stats[] = "stats";
 	uint8_t command_resetstats[] = "resetstats";
+	uint8_t command_channel[] = "channel";
+	uint8_t command_clearchannel[] = "clearchannel";
 	uint8_t command_send[] = "send";
 	uint8_t command_help[] = "help";
 
@@ -283,6 +303,7 @@ static void console_thread(void)
 		uint8_t *line = console_getline();
 		uint8_t *arg = NULL;
 		uint8_t *arg2 = NULL;
+		uint8_t *arg3 = NULL;
 
 		// Parse command and arguments
 		uint8_t *p = line;
@@ -308,6 +329,16 @@ static void console_thread(void)
 					while (*p == ' ') p++;
 					if (*p) {
 						arg2 = p;
+						// Find third argument
+						while (*p && *p != ' ') p++;
+						if (*p == ' ') {
+							*p = 0;
+							p++;
+							while (*p == ' ') p++;
+							if (*p) {
+								arg3 = p;
+							}
+						}
 					}
 				}
 			}
@@ -388,6 +419,34 @@ static void console_thread(void)
 		{
 			esb_reset_all_stats();
 		}
+		else if (memcmp(line, command_channel, sizeof(command_channel)) == 0)
+		{
+			if (!arg)
+			{
+				printk("Usage: channel <0-100>\n");
+				printk("Example: channel 25 - Set receiver RF channel to 25 (local only)\n");
+			}
+			else
+			{
+				char *endptr;
+				long channel = strtol(arg, &endptr, 10);
+
+				if (*endptr != '\0' || channel < 0 || channel > 100)
+				{
+					printk("Invalid channel. Must be a number between 0 and 100.\n");
+				}
+				else
+				{
+					esb_set_receiver_channel((uint8_t)channel);
+					printk("Receiver RF channel set to %d (local only)\n", (int)channel);
+				}
+			}
+		}
+		else if (memcmp(line, command_clearchannel, sizeof(command_clearchannel)) == 0)
+		{
+			esb_clear_receiver_channel();
+			printk("Receiver RF channel cleared (local only)\n");
+		}
 		else if (memcmp(line, command_send, sizeof(command_send)) == 0)
 		{
 			if (!arg || !arg2)
@@ -462,6 +521,45 @@ static void console_thread(void)
 				else if (strcmp(arg2, "dfu") == 0) {
 					cmd_flag = ESB_PONG_FLAG_DFU;
 					cmd_name = "DFU mode";
+				}
+				else if (strcmp(arg2, "channel") == 0) {
+					// Special handling for channel command - needs arg3
+					if (!arg3)
+					{
+						printk("Usage: send all channel <0-100>\n");
+						printk("Example: send all channel 25 - Set all trackers to channel 25\n");
+						continue;
+					}
+
+					char *endptr;
+					long channel = strtol(arg3, &endptr, 10);
+
+					if (*endptr != '\0' || channel < 0 || channel > 100)
+					{
+						printk("Invalid channel. Must be a number between 0 and 100.\n");
+						continue;
+					}
+
+					if (!target_all)
+					{
+						printk("Channel command only supports 'all' target\n");
+						continue;
+					}
+
+					esb_set_all_trackers_channel((uint8_t)channel);
+					printk("Setting RF channel to %d for all trackers and receiver\n", (int)channel);
+					continue;
+				}
+				else if (strcmp(arg2, "clearchannel") == 0) {
+					if (!target_all)
+					{
+						printk("Clearchannel command only supports 'all' target\n");
+						continue;
+					}
+
+					esb_clear_all_trackers_channel();
+					printk("Clearing RF channel for all trackers and receiver\n");
+					continue;
 				}
 
 				if (cmd_flag != 0xFF)

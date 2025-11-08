@@ -22,13 +22,10 @@
 */
 #include "esb.h"
 
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/crc.h>
+#include <zephyr/sys/atomic.h>
 
 #include "globals.h"
 #include "hid.h"
@@ -68,6 +65,15 @@ static uint8_t discovered_trackers[MAX_TRACKERS] = {0};
 static uint8_t last_packet_sequence[MAX_TRACKERS];  // 追踪每个追踪器的最后一个包序号
 static uint8_t packet_count[MAX_TRACKERS] = {0};  // 每个追踪器接收到的包计数
 static uint8_t tracker_remote_command[MAX_TRACKERS] = {ESB_PONG_FLAG_NORMAL};  // 追踪器远程命令标志
+static uint32_t tracker_channel_value = 0;  // 待设置的信道值（用于 SET_CHANNEL 命令）
+static uint8_t receiver_rf_channel = 0xFF;  // 接收器当前RF信道，0xFF表示使用默认值
+
+// Channel change confirmation tracking
+static bool channel_change_pending = false;  // 是否有待完成的信道切换
+static uint8_t pending_channel = 0;  // 待切换的信道值
+static atomic_t channel_ack_mask = ATOMIC_INIT(0);  // 用于追踪哪些tracker已确认信道切换（位掩码）
+static int64_t channel_change_timeout = 0;  // 信道切换超时时间
+#define CHANNEL_CHANGE_TIMEOUT_MS 5000  // 等待所有tracker确认的超时时间
 
 // 丢包统计结构
 struct packet_stats {
@@ -475,6 +481,18 @@ void event_handler(struct esb_evt const* event) {
 										tracker_id,
 										ping_ack_flag
 									);
+
+									// 如果是信道切换命令的确认，记录到掩码
+									if ((ping_ack_flag == ESB_PONG_FLAG_SET_CHANNEL ||
+									     ping_ack_flag == ESB_PONG_FLAG_CLEAR_CHANNEL) &&
+									    channel_change_pending) {
+										atomic_or(&channel_ack_mask, (1 << tracker_id));
+										uint8_t current_mask = atomic_get(&channel_ack_mask);
+										LOG_INF("Tracker %u confirmed channel change (%u/%u confirmed)",
+											tracker_id,
+											__builtin_popcount(current_mask),
+											stored_trackers);
+									}
 								}
 							}
 
@@ -494,11 +512,22 @@ void event_handler(struct esb_evt const* event) {
 							pong.data[5] = (t_lo >> 8) & 0xFF;
 							pong.data[6] = (t_lo) & 0xFF;
 							pong.data[7] = tracker_remote_command[tracker_id];
-							uint32_t rxt = (uint32_t)k_uptime_get();
-							pong.data[8] = (rxt >> 24) & 0xFF;
-							pong.data[9] = (rxt >> 16) & 0xFF;
-							pong.data[10] = (rxt >> 8) & 0xFF;
-							pong.data[11] = (rxt) & 0xFF;
+
+							// Fill data[8-11] based on command type
+							if (tracker_remote_command[tracker_id] == ESB_PONG_FLAG_SET_CHANNEL) {
+								// For SET_CHANNEL, use the channel value
+								pong.data[8] = (tracker_channel_value >> 24) & 0xFF;
+								pong.data[9] = (tracker_channel_value >> 16) & 0xFF;
+								pong.data[10] = (tracker_channel_value >> 8) & 0xFF;
+								pong.data[11] = (tracker_channel_value) & 0xFF;
+							} else {
+								// For other commands, use receiver time
+								uint32_t rxt = (uint32_t)k_uptime_get();
+								pong.data[8] = (rxt >> 24) & 0xFF;
+								pong.data[9] = (rxt >> 16) & 0xFF;
+								pong.data[10] = (rxt >> 8) & 0xFF;
+								pong.data[11] = (rxt) & 0xFF;
+							}
 							pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
 
 							int werr = esb_write_payload(&pong);
@@ -688,7 +717,10 @@ int esb_initialize(bool tx) {
 	err = esb_init(&config);
 
 	if (!err) {
-		esb_set_rf_channel(RADIO_RF_CHANNEL);
+		// Use saved channel if available, otherwise use default
+		uint8_t channel_to_use = (receiver_rf_channel <= 100) ? receiver_rf_channel : RADIO_RF_CHANNEL;
+		esb_set_rf_channel(channel_to_use);
+		LOG_INF("Set RF channel to %u", channel_to_use);
 	}
 
 	if (!err) {
@@ -1089,6 +1121,9 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag) {
 			case ESB_PONG_FLAG_DFU:
 				cmd_name = "DFU";
 				break;
+			case ESB_PONG_FLAG_SET_CHANNEL:
+				cmd_name = "SET_CHANNEL";
+				break;
 		}
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", cmd_name, command_flag, tracker_id);
 	} else {
@@ -1131,6 +1166,9 @@ void esb_send_remote_command_all(uint8_t command_flag) {
 		case ESB_PONG_FLAG_DFU:
 			cmd_name = "DFU";
 			break;
+		case ESB_PONG_FLAG_SET_CHANNEL:
+			cmd_name = "SET_CHANNEL";
+			break;
 	}
 
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
@@ -1163,6 +1201,81 @@ void esb_reset_all_stats(void) {
 	}
 	memset(&ack_statistics, 0, sizeof(struct ack_stats));
 	LOG_INF("All packet statistics and ACK statistics have been reset");
+}
+
+// 设置所有追踪器的 RF 信道
+void esb_set_all_trackers_channel(uint8_t channel) {
+	if (channel > 100) {
+		LOG_ERR("Invalid channel value: %u (must be 0-100)", channel);
+		return;
+	}
+
+	if (channel_change_pending) {
+		LOG_WRN("Channel change already in progress, please wait");
+		return;
+	}
+
+	tracker_channel_value = channel;
+	pending_channel = channel;
+	channel_change_pending = true;
+	atomic_set(&channel_ack_mask, 0);
+	channel_change_timeout = k_uptime_get() + CHANNEL_CHANGE_TIMEOUT_MS;
+
+	esb_send_remote_command_all(ESB_PONG_FLAG_SET_CHANNEL);
+	LOG_INF("RF channel %u command sent to all trackers, waiting for confirmation...", channel);
+}
+
+// 清除所有追踪器的RF信道设置（恢复默认）
+void esb_clear_all_trackers_channel(void) {
+	if (channel_change_pending) {
+		LOG_WRN("Channel change already in progress, please wait");
+		return;
+	}
+
+	pending_channel = 0xFF;  // Special value to indicate clearing
+	channel_change_pending = true;
+	atomic_set(&channel_ack_mask, 0);
+	channel_change_timeout = k_uptime_get() + CHANNEL_CHANGE_TIMEOUT_MS;
+
+	esb_send_remote_command_all(ESB_PONG_FLAG_CLEAR_CHANNEL);
+	LOG_INF("CLEAR_CHANNEL command sent to all trackers, waiting for confirmation...");
+}
+
+// 设置接收器的RF信道（本地，不影响tracker）
+void esb_set_receiver_channel(uint8_t channel) {
+	if (channel > 100) {
+		LOG_ERR("Invalid channel value: %u (must be 0-100)", channel);
+		return;
+	}
+
+	LOG_INF("Setting receiver RF channel to %u (local only)", channel);
+	receiver_rf_channel = channel;
+
+	// Save to NVS
+	sys_write(RF_CHANNEL, NULL, &receiver_rf_channel, sizeof(receiver_rf_channel));
+
+	// Reinitialize ESB with new channel
+	esb_deinitialize();
+	esb_initialize(false);
+	esb_start_rx();
+
+	LOG_INF("Receiver channel switched to %u", receiver_rf_channel);
+}
+
+// 清除接收器的RF信道设置（本地，不影响tracker）
+void esb_clear_receiver_channel(void) {
+	LOG_INF("Clearing receiver RF channel (local only)");
+	receiver_rf_channel = 0xFF;
+
+	// Clear from NVS
+	sys_write(RF_CHANNEL, NULL, &receiver_rf_channel, sizeof(receiver_rf_channel));
+
+	// Reinitialize ESB with default channel
+	esb_deinitialize();
+	esb_initialize(false);
+	esb_start_rx();
+
+	LOG_INF("Receiver channel cleared, using default");
 }
 
 // TODO:
@@ -1210,6 +1323,23 @@ static void esb_thread(void) {
 	}
 	k_mutex_unlock(&tracker_store_lock);
 
+	// Load saved RF channel from NVS if exists
+	uint8_t saved_channel = 0xFF;
+	sys_read(RF_CHANNEL, &saved_channel, sizeof(saved_channel));
+	// 0xFF and 0 both indicate "use default"
+	if (saved_channel != 0xFF && saved_channel != 0 && saved_channel <= 100) {
+		// Valid saved channel found, use it
+		receiver_rf_channel = saved_channel;
+		LOG_INF("Loaded RF channel %u from NVS", saved_channel);
+	} else {
+		LOG_INF("No saved RF channel, using default %u", RADIO_RF_CHANNEL);
+		// If channel was 0 (uninitialized), write 0xFF to NVS
+		if (saved_channel == 0) {
+			saved_channel = 0xFF;
+			sys_write(RF_CHANNEL, NULL, &saved_channel, sizeof(saved_channel));
+		}
+	}
+
 	if (tracker_count) {
 		esb_paired = true;
 	}
@@ -1228,6 +1358,55 @@ static void esb_thread(void) {
 			esb_initialize(false);
 			esb_start_rx();
 		}
+
+		// Check if channel change is complete
+		if (channel_change_pending) {
+			uint8_t expected_mask = (1 << stored_trackers) - 1;  // 所有tracker都应确认
+			uint8_t current_mask = atomic_get(&channel_ack_mask);
+			int64_t now = k_uptime_get();
+
+			if (current_mask == expected_mask) {
+				// All trackers confirmed, switch receiver channel
+				if (pending_channel == 0xFF) {
+					// Clear channel setting
+					LOG_INF("All trackers confirmed channel clear, restoring receiver to default");
+					receiver_rf_channel = 0xFF;
+
+					// Clear from NVS
+					sys_write(RF_CHANNEL, NULL, &receiver_rf_channel, sizeof(receiver_rf_channel));
+
+					// Reinitialize ESB with default channel
+					esb_deinitialize();
+					esb_initialize(false);
+					esb_start_rx();
+
+					LOG_INF("Receiver channel cleared, using default %u", RADIO_RF_CHANNEL);
+				} else {
+					// Set new channel
+					LOG_INF("All trackers confirmed channel change to %u, switching receiver", pending_channel);
+					receiver_rf_channel = pending_channel;
+
+					// Save to NVS
+					sys_write(RF_CHANNEL, NULL, &receiver_rf_channel, sizeof(receiver_rf_channel));
+
+					// Reinitialize ESB with new channel
+					esb_deinitialize();
+					esb_initialize(false);
+					esb_start_rx();
+
+					LOG_INF("Receiver channel switched to %u successfully", receiver_rf_channel);
+				}
+
+				channel_change_pending = false;
+			} else if (now >= channel_change_timeout) {
+				// Timeout, cancel channel change
+				LOG_WRN("Channel change timeout, %u/%u trackers confirmed",
+					__builtin_popcount(current_mask), stored_trackers);
+				channel_change_pending = false;
+				tracker_channel_value = 0;  // Reset pending channel value
+			}
+		}
+
 		k_msleep(100);
 	}
 }
