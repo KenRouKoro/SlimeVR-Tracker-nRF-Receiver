@@ -177,11 +177,14 @@ static void print_help(void)
 	printk("\n");
 	printk("Remote Commands:\n");
 	printk("  send <id|all> <command>    Send remote command to tracker(s)\n");
-	printk("    Commands: shutdown, calibrate, 6-side, meow, scan, mag\n");
+	printk("    Commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu\n");
 	printk("    Examples:\n");
 	printk("      send 0 shutdown          Shutdown tracker 0\n");
 	printk("      send all calibrate       Calibrate all trackers\n");
 	printk("      send 1 meow              Make tracker 1 meow\n");
+	printk("      send 2 reboot            Reboot tracker 2\n");
+	printk("      send 3 clear             Clear pairing on tracker 3\n");
+	printk("      send all dfu             Enter DFU mode on all trackers\n");
 	printk("\n");
 #if DFU_EXISTS
 	printk("Bootloader:\n");
@@ -395,7 +398,10 @@ static void console_thread(void)
 				printk("  send all shutdown    - Shutdown all trackers\n");
 				printk("  send 1 calibrate     - Calibrate tracker 1\n");
 				printk("  send all meow        - Make all trackers meow\n");
-				printk("Available commands: shutdown, calibrate, 6-side, meow, scan, mag\n");
+				printk("  send 2 reboot        - Reboot tracker 2\n");
+				printk("  send 3 clear         - Clear pairing on tracker 3\n");
+				printk("  send all dfu         - Enter DFU mode on all trackers\n");
+				printk("Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu\n");
 			}
 			else
 			{
@@ -445,6 +451,18 @@ static void console_thread(void)
 					cmd_flag = ESB_PONG_FLAG_MAG_CLEAR;
 					cmd_name = "Magnetometer clear";
 				}
+				else if (strcmp(arg2, "reboot") == 0) {
+					cmd_flag = ESB_PONG_FLAG_REBOOT;
+					cmd_name = "Reboot";
+				}
+				else if (strcmp(arg2, "clear") == 0) {
+					cmd_flag = ESB_PONG_FLAG_CLEAR;
+					cmd_name = "Clear pairing";
+				}
+				else if (strcmp(arg2, "dfu") == 0) {
+					cmd_flag = ESB_PONG_FLAG_DFU;
+					cmd_name = "DFU mode";
+				}
 
 				if (cmd_flag != 0xFF)
 				{
@@ -462,7 +480,7 @@ static void console_thread(void)
 				else
 				{
 					printk("Unknown command: %s\n", arg2);
-					printk("Available commands: shutdown, calibrate, 6-side, meow, scan, mag\n");
+					printk("Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu\n");
 				}
 			}
 		}
