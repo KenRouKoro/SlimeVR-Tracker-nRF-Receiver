@@ -763,6 +763,7 @@ inline void esb_set_addr_paired(void) {
 
 static bool esb_pairing = false;
 static bool esb_paired = false;
+static bool esb_clearing = false;
 
 int esb_add_pair(uint64_t addr, bool checksum) {
 	if (addr == 0) {
@@ -998,6 +999,8 @@ void esb_finish_pair(void) {
 }
 
 void esb_clear(void) {
+	esb_clearing = true;
+
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	uint8_t previous_count = stored_trackers;
 	stored_trackers = 0;
@@ -1014,7 +1017,10 @@ void esb_clear(void) {
 		);
 	}
 	LOG_INF("NVS Reset");
+
 	esb_reset_pair();
+
+	k_msleep(10);
 
 	// 重置所有追踪器的包序号状态
 	for (int i = 0; i < MAX_TRACKERS; i++) {
@@ -1026,8 +1032,8 @@ void esb_clear(void) {
 	}
 	LOG_INF("Packet sequence state and statistics reset for all trackers");
 
-	// 重置所有tracker的RSSI平滑状态
 	hid_reset_all_rssi_smooth();
+	esb_clearing = false;
 }
 
 // 重置特定追踪器的包序号状态
@@ -1198,7 +1204,7 @@ static void esb_thread(void) {
 	}
 
 	while (1) {
-		if (!esb_paired) {
+		if (!esb_paired && !esb_clearing) {
 			esb_pair();
 			esb_receive();
 			esb_initialize(false);

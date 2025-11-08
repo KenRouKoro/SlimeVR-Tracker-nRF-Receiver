@@ -333,9 +333,7 @@ void hid_reset_rssi_smooth(uint8_t tracker_id)
 // 重置所有tracker的RSSI平滑状态
 void hid_reset_all_rssi_smooth(void)
 {
-	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
-		hid_reset_rssi_smooth(i);
-	}
+	memset(rssi_states, 0, sizeof(rssi_states));
 }
 
 K_THREAD_DEFINE(hid_dropped_reports_logging_thread, 256, hid_dropped_reports_logging, NULL, NULL, NULL, 7, 0, 0);
