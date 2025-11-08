@@ -189,8 +189,8 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 
 	// 向后跳跃（旧包）视为乱序，保持当前窗口不变
 	// 注意：乱序包不计入total_received，因为会被丢弃，不转发到应用层
-	// 检查条件：diff_backward较小（< 128），说明是真正的向后跳跃（旧包）
-	if (diff_backward > 0 && diff_backward < 128) {
+	// 检查条件：diff_backward较小（< 64），说明是真正的向后跳跃（旧包）
+	if (diff_backward > 0 && diff_backward < 64) {
 		stats->out_of_order++;
 		LOG_DBG(
 			"Out-of-order packet dropped: tracker=%d, seq=%d (expected >%d), backward=%d",
@@ -203,9 +203,9 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 	}
 
 	// 检测大跳跃（可能是重启）
-	// 如果跳跃超过128（序号空间的一半），很可能是追踪器重启或回环
+	// 如果跳跃超过80，很可能是追踪器重启或回环
 	// 在这种情况下，不应该累加大量的gaps
-	if (diff_forward > 128) {
+	if (diff_forward > 80) {
 		// 这是一个大跳跃，视为追踪器重启
 		stats->total_received++;
 		stats->restart_events++;
@@ -223,7 +223,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 	}
 
 	// 向前跳跃（正常丢包范围）
-	if (diff_forward > 0 && diff_forward <= 128) {
+	if (diff_forward > 0 && diff_forward <= 80) {
 		stats->total_received++;
 		stats->gap_events++;
 		stats->total_gaps += (diff_forward - 1);  // 估计丢失的包数
@@ -377,10 +377,10 @@ void event_handler(struct esb_evt const* event) {
 				err = esb_read_rx_payload(&rx_payload);
 				if (err == -ENODATA)
 				{
-					return;
+					break;
 				} else if (err) {
 					LOG_ERR("Error while reading rx packet: %d", err);
-					return;
+					break;
 				}
 				switch (rx_payload.length) {
 					case 1: // ACK packet
@@ -656,9 +656,6 @@ int esb_initialize(bool tx) {
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
 
-	uint16_t jitter = (rand() % 160) - 80;
-	uint16_t retransmit_delay_with_jitter = RADIO_RETRANSMIT_DELAY + jitter;
-
 	if (tx) {
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
 		// config.mode = ESB_MODE_PTX;
@@ -666,7 +663,7 @@ int esb_initialize(bool tx) {
 		// config.bitrate = ESB_BITRATE_2MBPS;
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
-		config.retransmit_delay = retransmit_delay_with_jitter;
+		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
 		// config.retransmit_count = 0;
 		config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
@@ -679,7 +676,7 @@ int esb_initialize(bool tx) {
 		// config.bitrate = ESB_BITRATE_2MBPS;
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
-		config.retransmit_delay = retransmit_delay_with_jitter;
+		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
 		// config.retransmit_count = 3;
 		// config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
