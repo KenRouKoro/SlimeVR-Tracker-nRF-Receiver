@@ -217,7 +217,7 @@ static void send_report(struct k_work *work)
 		for (epind = 0; epind < reports_to_send; epind++) {
 			ep_report_buffer[epind] = reports[read_idx];
 			// necessary for isr thread safety
-			epind++;
+			// epind++;
 			read_idx++;
 			if (read_idx == MAX_TRACKERS) {
 				read_idx = 0;
