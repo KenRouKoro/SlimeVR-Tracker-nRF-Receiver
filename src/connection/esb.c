@@ -643,35 +643,44 @@ void event_handler(struct esb_evt const* event) {
 								bool is_large_gap = false;
 								bool is_tracker_restart = false;
 
-								// Detect out-of-order (backward jump) vs forward gap
-								// If diff > 128, it's likely a backward jump (out-of-order)
-								// BUT: if backward_amount is very large (>200), it's likely a tracker restart
-								// Example: last=90, new=88 -> diff=254 (actually -2, out-of-order)
-								//          last=88, new=90 -> diff=2 (forward, normal or small gap)
-								//          last=220, new=5 -> diff=41 (forward, but wraps around at 256)
-								//          last=20, new=3 -> diff=239 (backward -17, but could be restart if last was old)
-								if (counter_diff > 128) {
-									int backward_amount = 256 - counter_diff;
-									// 检测tracker重启：如果向后跳跃很大（>200），且新counter很小（<20）
-									// 这表明tracker重启了，counter从0重新开始
-									if (backward_amount > 200 && counter < 20) {
-										is_tracker_restart = true;
-										LOG_INF(
-											"Tracker restart detected (PING counter reset): id=%u old_ctr=%u new_ctr=%u",
-											tracker_id,
-											last_ping_counter[tracker_id],
-											counter
-										);
-									} else {
-										// This is an out-of-order packet (old packet arriving late)
-										is_out_of_order = true;
-									}
-								} else if (counter_diff > 5) {
-									// Forward gap, possible packet loss
-									is_large_gap = true;
-								}
+							// Detect out-of-order (backward jump) vs forward gap
+							// If diff > 128, it's likely a backward jump (out-of-order)
+							// BUT: if new counter is 0 or 1, it's likely a tracker restart
+							// Example: last=90, new=88 -> diff=254 (actually -2, out-of-order)
+							//          last=88, new=90 -> diff=2 (forward, normal or small gap)
+							//          last=220, new=5 -> diff=41 (forward, but wraps around at 256)
+							//          last=14, new=0 -> diff=242 (backward -14, but is restart)
+							//          last=17, new=0 -> diff=239 (backward -17, but is restart)
 
-								if (is_tracker_restart) {
+							// 检测tracker重启：如果新counter是0或1，且不是正常递增（diff != 1）
+							// 这表明tracker重启了，counter从0重新开始
+							if ((counter == 0 || counter == 1) && counter_diff != 1) {
+								is_tracker_restart = true;
+								LOG_INF(
+									"Tracker restart detected (PING counter reset to %u): id=%u old_ctr=%u",
+									counter,
+									tracker_id,
+									last_ping_counter[tracker_id]
+								);
+							} else if (counter_diff > 128) {
+								int backward_amount = 256 - counter_diff;
+								// 检测tracker重启：如果向后跳跃很大（>200），且新counter很小（<20）
+								if (backward_amount > 200 && counter < 20) {
+									is_tracker_restart = true;
+									LOG_INF(
+										"Tracker restart detected (large backward jump): id=%u old_ctr=%u new_ctr=%u",
+										tracker_id,
+										last_ping_counter[tracker_id],
+										counter
+									);
+								} else {
+									// This is an out-of-order packet (old packet arriving late)
+									is_out_of_order = true;
+								}
+							} else if (counter_diff > 5) {
+								// Forward gap, possible packet loss
+								is_large_gap = true;
+							}								if (is_tracker_restart) {
 									// Tracker重启，重置counter追踪
 									last_ping_counter[tracker_id] = counter;
 									last_pong_queued_counter[tracker_id] = 0xFF;  // 重置PONG队列追踪
