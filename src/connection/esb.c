@@ -272,52 +272,56 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 }
 
 // 打印特定追踪器的统计信息
+// 打印单个tracker的统计信息
 static void print_tracker_stats(uint8_t tracker_id) {
 	struct packet_stats* stats = &tracker_stats[tracker_id];
 
 	if (stats->total_received == 0 && stats->duplicate_packets == 0) {
-		return;  // 没有数据则不打印
+		return;
 	}
 
 	// 总的接收次数（包括重复包和乱序包）
 	uint32_t total_receives = stats->total_received + stats->duplicate_packets + stats->out_of_order;
 
-	// 计算各种比率
-	float duplicate_rate = 0.0f;
-	float out_of_order_rate = 0.0f;
-	float gap_rate = 0.0f;
+	// 计算各种比率（使用千分比避免浮点运算）
+	uint32_t duplicate_rate = 0;
+	uint32_t out_of_order_rate = 0;
 
 	if (total_receives > 0) {
-		duplicate_rate = ((float)stats->duplicate_packets / total_receives) * 100.0f;
-		out_of_order_rate = ((float)stats->out_of_order / total_receives) * 100.0f;
-	}
-
-	if (stats->total_received > 0) {
-		gap_rate = ((float)stats->gap_events / stats->total_received) * 100.0f;
+		duplicate_rate = (stats->duplicate_packets * 1000) / total_receives;
+		out_of_order_rate = (stats->out_of_order * 1000) / total_receives;
 	}
 
 	// 估算丢包率：基于跳跃的总数和接收的包数
 	uint32_t estimated_sent = stats->total_received + stats->total_gaps;
-	float estimated_loss_rate = 0.0f;
+	uint32_t estimated_loss_rate = 0;
 	if (estimated_sent > 0) {
-		estimated_loss_rate = ((float)stats->total_gaps / estimated_sent) * 100.0f;
+		estimated_loss_rate = (stats->total_gaps * 1000) / estimated_sent;
 	}
 
-	LOG_INF(
-		"Tracker %d: Recv=%u(+%u dup +%u ooo), Normal=%u, EstLoss=%.1f%% (%u gaps), "
-		"Dup=%.1f%%, OOO=%.1f%%, Restart=%u, TPS=%u",
+	LOG_INF("Tracker %d: Recv=%u(+%u dup +%u ooo), Normal=%u, EstLoss=%u.%u%% (%u gaps), "
+		"Dup=%u.%u%%, OOO=%u.%u%%, Restart=%u, TPS=%u",
 		tracker_id,
 		stats->total_received,
 		stats->duplicate_packets,
 		stats->out_of_order,
 		stats->normal_packets,
-		(double)estimated_loss_rate,
+		estimated_loss_rate / 10, estimated_loss_rate % 10,
 		stats->total_gaps,
-		(double)duplicate_rate,
-		(double)out_of_order_rate,
+		duplicate_rate / 10, duplicate_rate % 10,
+		out_of_order_rate / 10, out_of_order_rate % 10,
 		stats->restart_events,
 		stats->current_tps
 	);
+}
+
+// 批量打印tracker统计信息，一行一个tracker
+static void print_tracker_stats_batch(void) {
+	for (int i = 0; i < MAX_TRACKERS; i++) {
+		if (tracker_stats[i].total_received > 0 || tracker_stats[i].duplicate_packets > 0) {
+			print_tracker_stats(i);
+		}
+	}
 }
 
 // 打印ACK性能统计
@@ -342,17 +346,17 @@ static void print_ack_stats(void) {
 	);
 
 	// TX stats
-	uint32_t tx_total = tx_statistics.total_success + tx_statistics.total_failed;
-	if (tx_total > 0) {
-		float tx_fail_rate = ((float)tx_statistics.total_failed / tx_total) * 100.0f;
-		LOG_INF(
-			"TX Stats: success=%u failed=%u rate=%.1f%% (consecutive=%u)",
-			tx_statistics.total_success,
-			tx_statistics.total_failed,
-			(double)tx_fail_rate,
-			tx_statistics.consecutive_fails
-		);
-	}
+	// uint32_t tx_total = tx_statistics.total_success + tx_statistics.total_failed;
+	// if (tx_total > 0) {
+	// 	float tx_fail_rate = ((float)tx_statistics.total_failed / tx_total) * 100.0f;
+	// 	LOG_INF(
+	// 		"TX Stats: success=%u failed=%u rate=%.1f%% (consecutive=%u)",
+	// 		tx_statistics.total_success,
+	// 		tx_statistics.total_failed,
+	// 		(double)tx_fail_rate,
+	// 		tx_statistics.consecutive_fails
+	// 	);
+	// }
 }
 
 // 统计线程 - 定期打印统计信息
@@ -385,17 +389,16 @@ static void esb_stats_thread(void) {
 			bool has_data = false;
 			for (int i = 0; i < MAX_TRACKERS; i++) {
 				if (tracker_stats[i].total_received > 0) {
-					if (!has_data) {
-						LOG_INF("=== Packet Statistics ===");
-						has_data = true;
-					}
-					print_tracker_stats(i);
+					has_data = true;
+					break;
 				}
 			}
-			// 打印ACK统计
-			print_ack_stats();
+
 			if (has_data) {
-				LOG_INF("========================");
+				LOG_INF("=== Packet Statistics ===");
+				print_tracker_stats_batch();
+				// 打印ACK统计
+				print_ack_stats();
 			}
 			last_log_time = now;
 		}
@@ -411,28 +414,6 @@ void event_handler(struct esb_evt const* event) {
 			tx_statistics.success_since_last_log++;
 			tx_statistics.consecutive_fails = 0;  // Reset consecutive fail counter
 
-			// 只在DEBUG级别记录单次成功，减少日志输出
-			LOG_DBG("TX SUCCESS (total=%u)", tx_statistics.total_success);
-
-			// 定期输出汇总统计
-			if (now - tx_statistics.last_log_time >= TX_LOG_INTERVAL_MS &&
-			    tx_statistics.success_since_last_log > 0) {
-				uint32_t total = tx_statistics.total_success + tx_statistics.total_failed;
-				float fail_rate = total > 0 ?
-					((float)tx_statistics.total_failed / total) * 100.0f : 0.0f;
-
-				LOG_INF("TX: +%u OK, +%u fail (total: %u OK, %u fail, %.1f%% fail rate)",
-					tx_statistics.success_since_last_log,
-					tx_statistics.failed_since_last_log,
-					tx_statistics.total_success,
-					tx_statistics.total_failed,
-					(double)fail_rate
-				);
-
-				tx_statistics.success_since_last_log = 0;
-				tx_statistics.failed_since_last_log = 0;
-				tx_statistics.last_log_time = now;
-			}
 			break;
 
 		case ESB_EVENT_TX_FAILED:
@@ -475,25 +456,6 @@ void event_handler(struct esb_evt const* event) {
 					k_msleep(10);
 					tx_statistics.consecutive_fails = 0;  // Reset to avoid spam
 				}
-			}
-
-			// 定期输出汇总（即使只有失败）
-			if (now - tx_statistics.last_log_time >= TX_LOG_INTERVAL_MS) {
-				uint32_t total = tx_statistics.total_success + tx_statistics.total_failed;
-				float fail_rate = total > 0 ?
-					((float)tx_statistics.total_failed / total) * 100.0f : 0.0f;
-
-				LOG_WRN("TX: +%u OK, +%u fail (total: %u OK, %u fail, %.1f%% fail rate)",
-					tx_statistics.success_since_last_log,
-					tx_statistics.failed_since_last_log,
-					tx_statistics.total_success,
-					tx_statistics.total_failed,
-					(double)fail_rate
-				);
-
-				tx_statistics.success_since_last_log = 0;
-				tx_statistics.failed_since_last_log = 0;
-				tx_statistics.last_log_time = now;
 			}
 			break;
 		case ESB_EVENT_RX_RECEIVED: {
@@ -1516,11 +1478,8 @@ void esb_send_remote_command_all(uint8_t command_flag) {
 // 手动打印所有活跃追踪器的统计信息
 void esb_print_all_stats(void) {
 	LOG_INF("=== Packet Statistics Summary ===");
-	for (int i = 0; i < MAX_TRACKERS; i++) {
-		if (tracker_stats[i].total_received > 0) {
-			print_tracker_stats(i);
-		}
-	}
+	print_tracker_stats_batch();
+	print_ack_stats();
 	LOG_INF("================================");
 }
 
