@@ -1572,6 +1572,11 @@ void esb_clear_receiver_channel(void) {
 	LOG_INF("Receiver channel cleared, using default");
 }
 
+// 获取接收器的RF信道
+uint8_t esb_get_receiver_channel(void) {
+	return receiver_rf_channel;
+}
+
 // TODO:
 void esb_write_sync(uint16_t led_clock) {
 	if (!esb_initialized || !esb_paired) {

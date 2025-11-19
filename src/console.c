@@ -122,6 +122,14 @@ static void print_info(void)
 	printk("Target: " CONFIG_BOARD_TARGET "\n");
 
 	printk("\nDevice address: %012llX\n", *(uint64_t *)NRF_FICR->DEVICEADDR & 0xFFFFFFFFFFFF);
+
+	// Display RF channel info
+	uint8_t current_channel = esb_get_receiver_channel();
+	if (current_channel != 0xFF && current_channel <= 100) {
+		printk("RF Channel: %u (custom)\n", current_channel);
+	} else {
+		printk("RF Channel: %u (default)\n", CONFIG_RADIO_RF_CHANNEL);
+	}
 }
 
 static void print_uptime(void)

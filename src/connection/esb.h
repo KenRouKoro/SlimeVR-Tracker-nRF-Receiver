@@ -77,6 +77,7 @@ void esb_clear_all_trackers_channel(void);  // Clear RF channel setting (restore
 // Local receiver channel management
 void esb_set_receiver_channel(uint8_t channel);  // Set receiver RF channel only (local)
 void esb_clear_receiver_channel(void);  // Clear receiver RF channel (restore default, local)
+uint8_t esb_get_receiver_channel(void);  // Get current receiver RF channel (returns 0xFF if default)
 
 // Convenience wrappers for specific commands
 static inline void esb_request_tracker_shutdown(uint8_t tracker_id) {
