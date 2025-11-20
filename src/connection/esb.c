@@ -75,7 +75,6 @@ K_MSGQ_DEFINE(esb_pairing_msgq, sizeof(struct pairing_event), 8, 4);
 
 static K_MUTEX_DEFINE(tracker_store_lock);
 
-static uint8_t discovered_trackers[MAX_TRACKERS] = {0};
 static uint8_t last_packet_sequence[MAX_TRACKERS];  // 追踪每个追踪器的最后一个包序号
 static uint8_t last_ping_counter[MAX_TRACKERS] = {0};  // 追踪每个追踪器的最后一个PING counter
 static bool ping_counter_initialized[MAX_TRACKERS] = {false};  // 标记是否已接收过该tracker的PING
@@ -90,7 +89,7 @@ static bool channel_change_pending = false;  // 是否有待完成的信道切�
 static uint8_t pending_channel = 0;  // 待切换的信道值
 static atomic_t channel_ack_mask = ATOMIC_INIT(0);  // 用于追踪哪些tracker已确认信道切换（位掩码）
 static int64_t channel_change_timeout = 0;  // 信道切换超时时间
-#define CHANNEL_CHANGE_TIMEOUT_MS 5000  // 等待所有tracker确认的超时时间
+#define CHANNEL_CHANGE_TIMEOUT_MS 10000  // 等待所有tracker确认的超时时间
 
 // 丢包统计结构
 struct packet_stats {
@@ -121,21 +120,8 @@ K_THREAD_DEFINE(esb_stats_thread_id, 512, esb_stats_thread, NULL, NULL, NULL, 7,
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
-static void esb_packet_filter_thread(void);
-K_THREAD_DEFINE(
-	esb_packet_filter_thread_id,
-	256,
-	esb_packet_filter_thread,
-	NULL,
-	NULL,
-	NULL,
-	6,
-	0,
-	0
-);
-
 static void esb_thread(void);
-K_THREAD_DEFINE(esb_thread_id, 2048, esb_thread, NULL, NULL, NULL, 5, 0, 0);
+K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 5, 0, 0);
 
 static bool esb_parse_pair(const uint8_t packet[8]);
 
@@ -855,13 +841,7 @@ void event_handler(struct esb_evt const* event) {
 						if (imu_id >= stored_trackers) {  // not a stored tracker
 							continue;
 						}
-						if (discovered_trackers[imu_id]
-							< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
-													// tracker
-						{
-							discovered_trackers[imu_id]++;
-							continue;
-						}
+
 						if (rx_payload.data[0] > 223) {  // reserved for receiver only
 							break;
 						}
@@ -893,13 +873,7 @@ void event_handler(struct esb_evt const* event) {
 						if (imu_id >= stored_trackers) {  // not a stored tracker
 							continue;
 						}
-						if (discovered_trackers[imu_id]
-							< DETECTION_THRESHOLD)  // garbage filtering of nonexistent
-													// tracker
-						{
-							discovered_trackers[imu_id]++;
-							continue;
-						}
+
 						if (rx_payload.data[0] > 223) {  // reserved for receiver only
 							break;
 						}
@@ -1346,7 +1320,6 @@ void esb_clear(void) {
 	for (int i = 0; i < MAX_TRACKERS; i++) {
 		last_packet_sequence[i] = 0;
 		packet_count[i] = 0;
-		discovered_trackers[i] = 0;
 		// 重置统计信息
 		memset(&tracker_stats[i], 0, sizeof(struct packet_stats));
 	}
@@ -1361,7 +1334,6 @@ void esb_reset_tracker_sequence(uint8_t tracker_id) {
 	if (tracker_id < MAX_TRACKERS) {
 		last_packet_sequence[tracker_id] = 0;
 		packet_count[tracker_id] = 0;
-		discovered_trackers[tracker_id] = 0;
 		// 重置PING counter跟踪
 		last_ping_counter[tracker_id] = 0;
 		ping_counter_initialized[tracker_id] = false;
@@ -1592,19 +1564,6 @@ void esb_write_sync(uint16_t led_clock) {
 void esb_receive(void) {
 	esb_set_addr_paired();
 	esb_paired = true;
-}
-
-static void esb_packet_filter_thread(void) {
-	memset(discovered_trackers, 0, sizeof(discovered_trackers));
-	while (1)  // reset count if its not above threshold
-	{
-		k_msleep(1000);
-		for (int i = 0; i < MAX_TRACKERS; i++) {
-			if (discovered_trackers[i] < DETECTION_THRESHOLD) {
-				discovered_trackers[i] = 0;
-			}
-		}
-	}
 }
 
 static void esb_thread(void) {
