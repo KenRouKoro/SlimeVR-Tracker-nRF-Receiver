@@ -44,13 +44,6 @@ static struct esb_payload tx_payload_pair
 // 0, 0, 0, 0, 0, 0, 0);
 static struct esb_payload tx_payload_sync = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0);
 
-// ACK性能统计
-struct ack_stats {
-	uint32_t total_pings;      // 总PING数
-	uint32_t sent_pongs;       // 成功发送的PONG数
-	uint32_t failed_pongs;     // 发送失败的PONG数
-};
-static struct ack_stats ack_statistics = {0};
 
 // TX统计
 struct tx_stats {
@@ -112,16 +105,16 @@ struct packet_stats {
 static struct packet_stats tracker_stats[MAX_TRACKERS] = {0};
 #define STATS_PRINT_INTERVAL_MS 5000  // 每5秒打印一次统计
 #define TPS_CALCULATION_INTERVAL_MS 1000  // 每秒计算一次TPS
-#define TPS_MONITOR_INTERVAL_MS 250
+#define TPS_MONITOR_INTERVAL_MS 500
 
 // 统计线程相关
 static void esb_stats_thread(void);
-K_THREAD_DEFINE(esb_stats_thread_id, 512, esb_stats_thread, NULL, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(esb_stats_thread_id, 512, esb_stats_thread, NULL, NULL, NULL, 8, 0, 0);
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
-K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 5, 0, 0);
+K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 7, 0, 0);
 
 static bool esb_parse_pair(const uint8_t packet[8]);
 
@@ -310,41 +303,6 @@ static void print_tracker_stats_batch(void) {
 	}
 }
 
-// 打印ACK性能统计
-static void print_ack_stats(void) {
-	if (ack_statistics.total_pings == 0 && tx_statistics.total_failed == 0) {
-		return;
-	}
-
-	// ACK stats
-	float pong_fail_rate = 0.0f;
-	if (ack_statistics.sent_pongs + ack_statistics.failed_pongs > 0) {
-		pong_fail_rate = ((float)ack_statistics.failed_pongs /
-			(ack_statistics.sent_pongs + ack_statistics.failed_pongs)) * 100.0f;
-	}
-
-	LOG_INF(
-		"ACK Stats: PING=%u, PONG sent=%u failed=%u (%.1f%%)",
-		ack_statistics.total_pings,
-		ack_statistics.sent_pongs,
-		ack_statistics.failed_pongs,
-		(double)pong_fail_rate
-	);
-
-	// TX stats
-	// uint32_t tx_total = tx_statistics.total_success + tx_statistics.total_failed;
-	// if (tx_total > 0) {
-	// 	float tx_fail_rate = ((float)tx_statistics.total_failed / tx_total) * 100.0f;
-	// 	LOG_INF(
-	// 		"TX Stats: success=%u failed=%u rate=%.1f%% (consecutive=%u)",
-	// 		tx_statistics.total_success,
-	// 		tx_statistics.total_failed,
-	// 		(double)tx_fail_rate,
-	// 		tx_statistics.consecutive_fails
-	// 	);
-	// }
-}
-
 // 统计线程 - 定期打印统计信息
 static void esb_stats_thread(void) {
 	int64_t last_log_time = k_uptime_get();
@@ -383,8 +341,6 @@ static void esb_stats_thread(void) {
 			if (has_data) {
 				LOG_INF("=== Packet Statistics ===");
 				print_tracker_stats_batch();
-				// 打印ACK统计
-				print_ack_stats();
 			}
 			last_log_time = now;
 		}
@@ -566,8 +522,6 @@ void event_handler(struct esb_evt const* event) {
 								break;
 							}
 
-							ack_statistics.total_pings++;
-
 							// 第一次收到该tracker的PING - 直接接受，不做顺序检查
 							if (!ping_counter_initialized[tracker_id]) {
 								ping_counter_initialized[tracker_id] = true;
@@ -744,21 +698,19 @@ void event_handler(struct esb_evt const* event) {
 								pong.data[10] = (tracker_channel_value >> 8) & 0xFF;
 								pong.data[11] = (tracker_channel_value) & 0xFF;
 							} else {
-								// For other commands, use receiver time
-								uint32_t rxt = (uint32_t)k_uptime_get();
-								pong.data[8] = (rxt >> 24) & 0xFF;
-								pong.data[9] = (rxt >> 16) & 0xFF;
-								pong.data[10] = (rxt >> 8) & 0xFF;
-								pong.data[11] = (rxt) & 0xFF;
+								// For other commands, use receiver cycle timestamp (high precision)
+								uint32_t rxt_cycles = k_cycle_get_32();
+								pong.data[8] = (rxt_cycles >> 24) & 0xFF;
+								pong.data[9] = (rxt_cycles >> 16) & 0xFF;
+								pong.data[10] = (rxt_cycles >> 8) & 0xFF;
+								pong.data[11] = (rxt_cycles) & 0xFF;
 							}
-							pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
-
-							// Try to write ACK payload with robust error handling
+							pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);							// Try to write ACK payload with robust error handling
+							esb_flush_tx();
 							int werr = esb_write_payload(&pong);
 
 							if (werr == 0) {
 								// Success - mark this counter as queued
-								ack_statistics.sent_pongs++;
 								last_pong_queued_counter[tracker_id] = counter;
 								LOG_DBG(
 									"ACK payload queued: PONG id=%u ctr=%u pipe=%u cmd=0x%02X",
@@ -785,8 +737,6 @@ void event_handler(struct esb_evt const* event) {
 									err_str = "EINVAL (invalid payload)";
 									should_retry = false;  // Invalid payload, retry won't help
 								}
-
-								ack_statistics.failed_pongs++;
 
 								// 只在DEBUG级别记录单次失败，减少日志噪音
 								// 严重错误（如EINVAL）仍然用WARNING
@@ -820,7 +770,6 @@ void event_handler(struct esb_evt const* event) {
 									// Retry once
 									werr = esb_write_payload(&pong);
 									if (werr == 0) {
-										ack_statistics.sent_pongs++;
 										last_pong_queued_counter[tracker_id] = counter;
 										LOG_DBG("ACK payload queued successfully after retry");
 									} else {
@@ -1451,7 +1400,6 @@ void esb_send_remote_command_all(uint8_t command_flag) {
 void esb_print_all_stats(void) {
 	LOG_INF("=== Packet Statistics Summary ===");
 	print_tracker_stats_batch();
-	print_ack_stats();
 	LOG_INF("================================");
 }
 
@@ -1464,7 +1412,6 @@ void esb_reset_all_stats(void) {
 		last_ping_counter[i] = 0;
 		last_pong_queued_counter[i] = 0;
 	}
-	memset(&ack_statistics, 0, sizeof(struct ack_stats));
 	memset(&tx_statistics, 0, sizeof(struct tx_stats));
 	LOG_INF("All packet statistics, ACK statistics, and TX statistics have been reset");
 }
