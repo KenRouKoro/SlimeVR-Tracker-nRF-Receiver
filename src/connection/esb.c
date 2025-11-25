@@ -82,7 +82,7 @@ static bool channel_change_pending = false;  // 是否有待完成的信道切�
 static uint8_t pending_channel = 0;  // 待切换的信道值
 static atomic_t channel_ack_mask = ATOMIC_INIT(0);  // 用于追踪哪些tracker已确认信道切换（位掩码）
 static int64_t channel_change_timeout = 0;  // 信道切换超时时间
-#define CHANNEL_CHANGE_TIMEOUT_MS 10000  // 等待所有tracker确认的超时时间
+#define CHANNEL_CHANGE_TIMEOUT_MS 15000  // 等待所有tracker确认的超时时间
 
 // 丢包统计结构
 struct packet_stats {
@@ -705,8 +705,8 @@ void event_handler(struct esb_evt const* event) {
 								pong.data[10] = (rxt_cycles >> 8) & 0xFF;
 								pong.data[11] = (rxt_cycles) & 0xFF;
 							}
-							pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);							// Try to write ACK payload with robust error handling
-							esb_flush_tx();
+							// Try to write ACK payload with robust error handling
+							pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
 							int werr = esb_write_payload(&pong);
 
 							if (werr == 0) {
