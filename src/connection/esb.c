@@ -24,8 +24,8 @@
 
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/kernel.h>
-#include <zephyr/sys/crc.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/crc.h>
 
 #include "globals.h"
 #include "hid.h"
@@ -37,27 +37,25 @@
 static struct esb_payload rx_payload;
 // static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
 //														  0, 0, 0, 0, 0, 0, 0, 0);
-static struct esb_payload tx_payload_pair
-	= ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0, 0, 0, 0, 0);
+static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0, 0, 0, 0, 0);
 // static struct esb_payload tx_payload_timer = ESB_CREATE_PAYLOAD(0,
 //														  0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 // 0, 0, 0, 0, 0, 0, 0);
 static struct esb_payload tx_payload_sync = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0);
 
-
 // TX统计
 struct tx_stats {
-	uint32_t total_success;    // 总成功数
-	uint32_t total_failed;     // 总失败数
-	uint32_t consecutive_fails; // 连续失败数
-	int64_t last_fail_time;    // 上次失败时间
-	int64_t last_log_time;     // 上次日志时间
+	uint32_t total_success;          // 总成功数
+	uint32_t total_failed;           // 总失败数
+	uint32_t consecutive_fails;      // 连续失败数
+	int64_t last_fail_time;          // 上次失败时间
+	int64_t last_log_time;           // 上次日志时间
 	uint32_t success_since_last_log; // 上次日志后的成功数
 	uint32_t failed_since_last_log;  // 上次日志后的失败数
 };
 static struct tx_stats tx_statistics = {0};
 
-#define TX_LOG_INTERVAL_MS 1000  // TX统计每秒最多输出一次
+#define TX_LOG_INTERVAL_MS 1000 // TX统计每秒最多输出一次
 
 struct pairing_event {
 	uint8_t packet[8];
@@ -68,43 +66,43 @@ K_MSGQ_DEFINE(esb_pairing_msgq, sizeof(struct pairing_event), 8, 4);
 
 static K_MUTEX_DEFINE(tracker_store_lock);
 
-static uint8_t last_packet_sequence[MAX_TRACKERS];  // 追踪每个追踪器的最后一个包序号
-static uint8_t last_ping_counter[MAX_TRACKERS] = {0};  // 追踪每个追踪器的最后一个PING counter
-static bool ping_counter_initialized[MAX_TRACKERS] = {false};  // 标记是否已接收过该tracker的PING
-static uint8_t last_pong_queued_counter[MAX_TRACKERS] = {0};  // 追踪每个追踪器最后入队的PONG counter
-static uint8_t packet_count[MAX_TRACKERS] = {0};  // 每个追踪器接收到的包计数
-static uint8_t tracker_remote_command[MAX_TRACKERS] = {ESB_PONG_FLAG_NORMAL};  // 追踪器远程命令标志
-static uint32_t tracker_channel_value = 0;  // 待设置的信道值（用于 SET_CHANNEL 命令）
-static uint8_t receiver_rf_channel = 0xFF;  // 接收器当前RF信道，0xFF表示使用默认值
+static uint8_t last_packet_sequence[MAX_TRACKERS];                            // 追踪每个追踪器的最后一个包序号
+static uint8_t last_ping_counter[MAX_TRACKERS] = {0};                         // 追踪每个追踪器的最后一个PING counter
+static bool ping_counter_initialized[MAX_TRACKERS] = {false};                 // 标记是否已接收过该tracker的PING
+static uint8_t last_pong_queued_counter[MAX_TRACKERS] = {0};                  // 追踪每个追踪器最后入队的PONG counter
+static uint8_t packet_count[MAX_TRACKERS] = {0};                              // 每个追踪器接收到的包计数
+static uint8_t tracker_remote_command[MAX_TRACKERS] = {ESB_PONG_FLAG_NORMAL}; // 追踪器远程命令标志
+static uint32_t tracker_channel_value = 0;                                    // 待设置的信道值（用于 SET_CHANNEL 命令）
+static uint8_t receiver_rf_channel = 0xFF;                                    // 接收器当前RF信道，0xFF表示使用默认值
 
 // Channel change confirmation tracking
-static bool channel_change_pending = false;  // 是否有待完成的信道切换
-static uint8_t pending_channel = 0;  // 待切换的信道值
-static atomic_t channel_ack_mask = ATOMIC_INIT(0);  // 用于追踪哪些tracker已确认信道切换（位掩码）
-static int64_t channel_change_timeout = 0;  // 信道切换超时时间
-#define CHANNEL_CHANGE_TIMEOUT_MS 15000  // 等待所有tracker确认的超时时间
+static bool channel_change_pending = false;        // 是否有待完成的信道切换
+static uint8_t pending_channel = 0;                // 待切换的信道值
+static atomic_t channel_ack_mask = ATOMIC_INIT(0); // 用于追踪哪些tracker已确认信道切换（位掩码）
+static int64_t channel_change_timeout = 0;         // 信道切换超时时间
+#define CHANNEL_CHANGE_TIMEOUT_MS 15000            // 等待所有tracker确认的超时时间
 
 // 丢包统计结构
 struct packet_stats {
-	uint32_t total_received;  // 实际接收到的包数（不包括重复包）
-	uint32_t normal_packets;  // 正常按序的包数
-	uint32_t gap_events;  // 跳跃事件数（可能是丢包）
-	uint32_t out_of_order;  // 乱序包数
-	uint32_t duplicate_packets;  // 重复包数
-	uint32_t restart_events;  // 重启事件数
-	uint32_t total_gaps;  // 总跳跃数（估计丢包数）
-	uint32_t last_sequence;  // 最后一个正常序列号
+	uint32_t total_received;    // 实际接收到的包数（不包括重复包）
+	uint32_t normal_packets;    // 正常按序的包数
+	uint32_t gap_events;        // 跳跃事件数（可能是丢包）
+	uint32_t out_of_order;      // 乱序包数
+	uint32_t duplicate_packets; // 重复包数
+	uint32_t restart_events;    // 重启事件数
+	uint32_t total_gaps;        // 总跳跃数（估计丢包数）
+	uint32_t last_sequence;     // 最后一个正常序列号
 	uint64_t last_packet_time;  // 最后一个包的时间戳
-	bool first_packet;  // 是否是第一个包
+	bool first_packet;          // 是否是第一个包
 	// TPS 计算相关
-	uint32_t packets_in_last_second;  // 上一秒的包数
-	uint64_t last_tps_time;  // 上次TPS计算时间
-	uint32_t current_tps;  // 当前TPS
+	uint32_t packets_in_last_second; // 上一秒的包数
+	uint64_t last_tps_time;          // 上次TPS计算时间
+	uint32_t current_tps;            // 当前TPS
 };
 
 static struct packet_stats tracker_stats[MAX_TRACKERS] = {0};
-#define STATS_PRINT_INTERVAL_MS 5000  // 每5秒打印一次统计
-#define TPS_CALCULATION_INTERVAL_MS 1000  // 每秒计算一次TPS
+#define STATS_PRINT_INTERVAL_MS 5000     // 每5秒打印一次统计
+#define TPS_CALCULATION_INTERVAL_MS 1000 // 每秒计算一次TPS
 #define TPS_MONITOR_INTERVAL_MS 500
 
 // 统计线程相关
@@ -118,12 +116,13 @@ K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 7, 0, 0);
 
 static bool esb_parse_pair(const uint8_t packet[8]);
 
-static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
+static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
+{
 	if (tracker_id >= MAX_TRACKERS) {
 		return 2;
 	}
 
-	struct packet_stats* stats = &tracker_stats[tracker_id];
+	struct packet_stats *stats = &tracker_stats[tracker_id];
 	uint64_t current_time = k_uptime_get();
 
 	// 更新TPS计算
@@ -178,15 +177,13 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 	}
 
 	// 计算序号差值（考虑循环）
-	uint8_t diff_forward
-		= (received_seq - last_seq) & 0xFF;  // 向前差值（包含跨越回环）
-	uint8_t diff_backward
-		= (last_seq - received_seq) & 0xFF;  // 向后差值（包含跨越回环）
+	uint8_t diff_forward = (received_seq - last_seq) & 0xFF;  // 向前差值（包含跨越回环）
+	uint8_t diff_backward = (last_seq - received_seq) & 0xFF; // 向后差值（包含跨越回环）
 
 	if (diff_forward == 0) {
 		// 相同序号 - 这是真正的重复包
 		stats->duplicate_packets++;
-		return 4;  // 重复包
+		return 4; // 重复包
 	}
 
 	// 向后跳跃（旧包）视为乱序，保持当前窗口不变
@@ -196,7 +193,8 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 		stats->out_of_order++;
 		// 只在DEBUG级别记录单次乱序，减少日志输出
 		LOG_DBG(
-			"Out-of-order packet dropped: tracker=%d, seq=%d (expected >%d), backward=%d",
+			"Out-of-order packet dropped: tracker=%d, seq=%d (expected >%d), "
+			"backward=%d",
 			tracker_id,
 			received_seq,
 			last_seq,
@@ -223,14 +221,14 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 			received_seq,
 			diff_forward
 		);
-		return 3;  // 重启事件
+		return 3; // 重启事件
 	}
 
 	// 向前跳跃（正常丢包范围）
 	if (diff_forward > 0 && diff_forward <= 80) {
 		stats->total_received++;
 		stats->gap_events++;
-		stats->total_gaps += (diff_forward - 1);  // 估计丢失的包数
+		stats->total_gaps += (diff_forward - 1); // 估计丢失的包数
 		last_packet_sequence[tracker_id] = received_seq;
 		packet_count[tracker_id]++;
 		stats->last_sequence = received_seq;
@@ -252,8 +250,9 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq) {
 
 // 打印特定追踪器的统计信息
 // 打印单个tracker的统计信息
-static void print_tracker_stats(uint8_t tracker_id) {
-	struct packet_stats* stats = &tracker_stats[tracker_id];
+static void print_tracker_stats(uint8_t tracker_id)
+{
+	struct packet_stats *stats = &tracker_stats[tracker_id];
 
 	if (stats->total_received == 0 && stats->duplicate_packets == 0) {
 		return;
@@ -278,24 +277,29 @@ static void print_tracker_stats(uint8_t tracker_id) {
 		estimated_loss_rate = (stats->total_gaps * 1000) / estimated_sent;
 	}
 
-	LOG_INF("Tracker %d: Recv=%u(+%u dup +%u ooo), Normal=%u, EstLoss=%u.%u%% (%u gaps), "
+	LOG_INF(
+		"Tracker %d: Recv=%u(+%u dup +%u ooo), Normal=%u, EstLoss=%u.%u%% (%u gaps), "
 		"Dup=%u.%u%%, OOO=%u.%u%%, Restart=%u, TPS=%u",
 		tracker_id,
 		stats->total_received,
 		stats->duplicate_packets,
 		stats->out_of_order,
 		stats->normal_packets,
-		estimated_loss_rate / 10, estimated_loss_rate % 10,
+		estimated_loss_rate / 10,
+		estimated_loss_rate % 10,
 		stats->total_gaps,
-		duplicate_rate / 10, duplicate_rate % 10,
-		out_of_order_rate / 10, out_of_order_rate % 10,
+		duplicate_rate / 10,
+		duplicate_rate % 10,
+		out_of_order_rate / 10,
+		out_of_order_rate % 10,
 		stats->restart_events,
 		stats->current_tps
 	);
 }
 
 // 批量打印tracker统计信息，一行一个tracker
-static void print_tracker_stats_batch(void) {
+static void print_tracker_stats_batch(void)
+{
 	for (int i = 0; i < MAX_TRACKERS; i++) {
 		if (tracker_stats[i].total_received > 0 || tracker_stats[i].duplicate_packets > 0) {
 			print_tracker_stats(i);
@@ -304,7 +308,8 @@ static void print_tracker_stats_batch(void) {
 }
 
 // 统计线程 - 定期打印统计信息
-static void esb_stats_thread(void) {
+static void esb_stats_thread(void)
+{
 	int64_t last_log_time = k_uptime_get();
 
 	while (1) {
@@ -312,16 +317,14 @@ static void esb_stats_thread(void) {
 
 		uint64_t now = (uint64_t)k_uptime_get();
 		for (int i = 0; i < MAX_TRACKERS; i++) {
-			struct packet_stats* stats = &tracker_stats[i];
+			struct packet_stats *stats = &tracker_stats[i];
 			if (stats->last_tps_time == 0) {
 				continue;
 			}
 			if (now - stats->last_tps_time >= TPS_CALCULATION_INTERVAL_MS) {
 				if (stats->packets_in_last_second > 0) {
 					stats->current_tps = stats->packets_in_last_second;
-				} else if (stats->last_packet_time
-						   && now - stats->last_packet_time
-								  >= TPS_CALCULATION_INTERVAL_MS) {
+				} else if (stats->last_packet_time && now - stats->last_packet_time >= TPS_CALCULATION_INTERVAL_MS) {
 					stats->current_tps = 0;
 				}
 				stats->packets_in_last_second = 0;
@@ -347,503 +350,512 @@ static void esb_stats_thread(void) {
 	}
 }
 
-void event_handler(struct esb_evt const* event) {
+void event_handler(struct esb_evt const *event)
+{
 	int64_t now = k_uptime_get();
 
 	switch (event->evt_id) {
-		case ESB_EVENT_TX_SUCCESS:
-			tx_statistics.total_success++;
-			tx_statistics.success_since_last_log++;
-			tx_statistics.consecutive_fails = 0;  // Reset consecutive fail counter
+	case ESB_EVENT_TX_SUCCESS:
+		tx_statistics.total_success++;
+		tx_statistics.success_since_last_log++;
+		tx_statistics.consecutive_fails = 0; // Reset consecutive fail counter
 
-			break;
+		break;
 
-		case ESB_EVENT_TX_FAILED:
-			esb_pop_tx();
-			tx_statistics.total_failed++;
-			tx_statistics.failed_since_last_log++;
-			tx_statistics.consecutive_fails++;
-			tx_statistics.last_fail_time = now;
+	case ESB_EVENT_TX_FAILED:
+		esb_pop_tx();
+		tx_statistics.total_failed++;
+		tx_statistics.failed_since_last_log++;
+		tx_statistics.consecutive_fails++;
+		tx_statistics.last_fail_time = now;
 
-			// 只在连续失败较多时才输出详细日志
-			if (tx_statistics.consecutive_fails <= 3) {
-				// 低频率失败 - DEBUG级别
-				LOG_DBG(
-					"TX FAILED (attempts=%u, consecutive=%u)",
-					event->tx_attempts,
-					tx_statistics.consecutive_fails
+		// 只在连续失败较多时才输出详细日志
+		if (tx_statistics.consecutive_fails <= 3) {
+			// 低频率失败 - DEBUG级别
+			LOG_DBG("TX FAILED (attempts=%u, consecutive=%u)", event->tx_attempts, tx_statistics.consecutive_fails);
+		} else if (tx_statistics.consecutive_fails <= 10) {
+			// 中等频率失败 - 每5次输出一次
+			if (tx_statistics.consecutive_fails % 5 == 0) {
+				LOG_WRN(
+					"TX FAILED repeatedly! (consecutive=%u, attempts=%u)",
+					tx_statistics.consecutive_fails,
+					event->tx_attempts
 				);
-			} else if (tx_statistics.consecutive_fails <= 10) {
-				// 中等频率失败 - 每5次输出一次
-				if (tx_statistics.consecutive_fails % 5 == 0) {
-					LOG_WRN(
-						"TX FAILED repeatedly! (consecutive=%u, attempts=%u)",
-						tx_statistics.consecutive_fails,
-						event->tx_attempts
-					);
-				}
-			} else {
-				// 高频失败 - 每10次输出一次
-				if (tx_statistics.consecutive_fails % 10 == 0) {
-					LOG_ERR(
-						"TX CRITICAL: %u consecutive failures! Check RF environment",
-						tx_statistics.consecutive_fails
-					);
-				}
-
-				// 恢复机制
-				if (tx_statistics.consecutive_fails >= 50) {
-					LOG_ERR("Too many TX failures, attempting ESB recovery...");
-					esb_flush_tx();
-					k_msleep(10);
-					tx_statistics.consecutive_fails = 0;  // Reset to avoid spam
-				}
 			}
-			break;
-		case ESB_EVENT_RX_RECEIVED: {
-			int err = 0;
-			while (!err) {
-				err = esb_read_rx_payload(&rx_payload);
-				if (err == -ENODATA)
-				{
+		} else {
+			// 高频失败 - 每10次输出一次
+			if (tx_statistics.consecutive_fails % 10 == 0) {
+				LOG_ERR("TX CRITICAL: %u consecutive failures! Check RF environment", tx_statistics.consecutive_fails);
+			}
+
+			// 恢复机制
+			if (tx_statistics.consecutive_fails >= 50) {
+				LOG_ERR("Too many TX failures, attempting ESB recovery...");
+				esb_flush_tx();
+				k_msleep(10);
+				tx_statistics.consecutive_fails = 0; // Reset to avoid spam
+			}
+		}
+		break;
+	case ESB_EVENT_RX_RECEIVED: {
+		int err = 0;
+		while (!err) {
+			err = esb_read_rx_payload(&rx_payload);
+			if (err == -ENODATA) {
+				break;
+			} else if (err) {
+				LOG_ERR("Error while reading rx packet: %d", err);
+				break;
+			}
+			switch (rx_payload.length) {
+			case 1: // ACK packet
+				LOG_DBG("RX ACK len=%u pipe=%u data=%02X", rx_payload.length, rx_payload.pipe, rx_payload.data[0]);
+				break;
+			case 8: {
+				struct pairing_event evt = {0};
+				memcpy(evt.packet, rx_payload.data, sizeof(evt.packet));
+				LOG_DBG("rx: %16llX", *(uint64_t *)evt.packet);
+				int q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
+				if (q_err) {
+					struct pairing_event discarded;
+					if (k_msgq_get(&esb_pairing_msgq, &discarded, K_NO_WAIT) == 0) {
+						q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
+					}
+					if (q_err) {
+						LOG_WRN("ACK queue full, dropping packet type %u", evt.packet[1]);
+					}
+				}
+				switch (evt.packet[1]) {
+				case 1: // receives ack generated from last packet
+					LOG_DBG("RX Pairing Sent ACK");
 					break;
-				} else if (err) {
-					LOG_ERR("Error while reading rx packet: %d", err);
+				case 2: // should "acknowledge" pairing data sent from
+						// receiver
+					LOG_DBG("RX Pairing ACK Receiver");
+					break;
+				case 0:
+					LOG_INF("RX Pairing Request");
+					break;
+				default:
+					LOG_WRN("Unexpected pairing packet type %u", evt.packet[1]);
 					break;
 				}
-				switch (rx_payload.length) {
-					case 1: // ACK packet
-						LOG_DBG(
-							"RX ACK len=%u pipe=%u data=%02X",
-							rx_payload.length,
-							rx_payload.pipe,
-							rx_payload.data[0]
-						);
-						break;
-					case 8: {
-						struct pairing_event evt = {0};
-						memcpy(evt.packet, rx_payload.data, sizeof(evt.packet));
-						LOG_DBG("rx: %16llX", *(uint64_t*)evt.packet);
-						int q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
-						if (q_err) {
-							struct pairing_event discarded;
-							if (k_msgq_get(&esb_pairing_msgq, &discarded, K_NO_WAIT)
-								== 0) {
-								q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
-							}
-							if (q_err) {
-								LOG_WRN(
-									"ACK queue full, dropping packet type %u",
-									evt.packet[1]
-								);
-							}
+				break;
+			} break;
+			case ESB_PING_LEN: {
+				LOG_DBG(
+					"Received PING type=%u id=%u ctr=%u",
+					rx_payload.data[0],
+					rx_payload.data[1],
+					rx_payload.data[2]
+				);
+				// Check for PING control packet and respond with PONG
+				if (rx_payload.data[0] == ESB_PING_TYPE) {
+					uint8_t tracker_id = rx_payload.data[1];
+					uint8_t counter = rx_payload.data[2];
+					uint32_t t_lo = ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
+								  | ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
+					uint8_t ping_ack_flag = rx_payload.data[7];
+
+					if (rx_payload.pipe != 1 + (tracker_id % 7)) {
+						// PIPE不匹配 - 降低日志频率
+						static uint8_t pipe_mismatch_count[MAX_TRACKERS] = {0};
+						pipe_mismatch_count[tracker_id]++;
+
+						if (pipe_mismatch_count[tracker_id] % 10 == 1) {
+							// 每10次输出一次
+							LOG_WRN(
+								"PING pipe mismatch (x%u): id=%u, expected "
+								"pipe=%u got pipe=%u",
+								pipe_mismatch_count[tracker_id],
+								tracker_id,
+								1 + (tracker_id % 7),
+								rx_payload.pipe
+							);
+						} else {
+							LOG_DBG(
+								"PING pipe mismatch: id=%u, expected pipe=%u "
+								"got pipe=%u",
+								tracker_id,
+								1 + (tracker_id % 7),
+								rx_payload.pipe
+							);
 						}
-						switch (evt.packet[1]) {
-							case 1:  // receives ack generated from last packet
-								LOG_DBG("RX Pairing Sent ACK");
-								break;
-							case 2:  // should "acknowledge" pairing data sent from
-										// receiver
-								LOG_DBG("RX Pairing ACK Receiver");
-								break;
-							case 0:
-								LOG_INF("RX Pairing Request");
-								break;
-							default:
-								LOG_WRN(
-									"Unexpected pairing packet type %u",
-									evt.packet[1]
-								);
-								break;
+					}
+
+					// check crc for PING
+					uint8_t crc_calc = crc8_ccitt(0x07, rx_payload.data, ESB_PING_LEN - 1);
+					if (rx_payload.data[ESB_PING_LEN - 1] != crc_calc) {
+						// CRC错误 - 只在连续多次错误时才输出WARNING
+						static uint8_t crc_error_count[MAX_TRACKERS] = {0};
+						crc_error_count[tracker_id]++;
+
+						if (crc_error_count[tracker_id] % 5 == 1) {
+							// 每5次错误输出一次
+							LOG_WRN(
+								"PING CRC mismatch (x%u): id=%u expected %02X "
+								"got %02X",
+								crc_error_count[tracker_id],
+								tracker_id,
+								crc_calc,
+								rx_payload.data[ESB_PING_LEN - 1]
+							);
+						} else {
+							LOG_DBG(
+								"PING CRC mismatch: id=%u expected %02X got "
+								"%02X",
+								tracker_id,
+								crc_calc,
+								rx_payload.data[ESB_PING_LEN - 1]
+							);
 						}
 						break;
-					} break;
-					case ESB_PING_LEN: {
-						LOG_DBG(
-							"Received PING type=%u id=%u ctr=%u",
-							rx_payload.data[0],
-							rx_payload.data[1],
-							rx_payload.data[2]
-						);
-						// Check for PING control packet and respond with PONG
-						if (rx_payload.data[0] == ESB_PING_TYPE) {
-							uint8_t tracker_id = rx_payload.data[1];
-							uint8_t counter = rx_payload.data[2];
-							uint32_t t_lo = ((uint32_t)rx_payload.data[3] << 24)
-											| ((uint32_t)rx_payload.data[4] << 16)
-											| ((uint32_t)rx_payload.data[5] << 8)
-											| ((uint32_t)rx_payload.data[6]);
-							uint8_t ping_ack_flag = rx_payload.data[7];
+					}
 
-							if (rx_payload.pipe != 1 + (tracker_id % 7)) {
-								// PIPE不匹配 - 降低日志频率
-								static uint8_t pipe_mismatch_count[MAX_TRACKERS] = {0};
-								pipe_mismatch_count[tracker_id]++;
+					// 第一次收到该tracker的PING - 直接接受，不做顺序检查
+					if (!ping_counter_initialized[tracker_id]) {
+						ping_counter_initialized[tracker_id] = true;
+						last_ping_counter[tracker_id] = counter;
+						last_pong_queued_counter[tracker_id] = 0xFF; // 标记未队列过
+						LOG_DBG("First PING from tracker %u, ctr=%u, initializing", tracker_id, counter);
+						// 继续处理，发送PONG
+					} else {
+						// 已经初始化过，进行顺序检查
+						// Detect if this is a retransmission or duplicate PING
+						// This helps avoid queuing the same PONG multiple times
+						int counter_diff = (int)counter - (int)last_ping_counter[tracker_id];
+						if (counter_diff < 0) {
+							counter_diff += 256; // Handle wrap-around
+						}
 
-								if (pipe_mismatch_count[tracker_id] % 10 == 1) {
-									// 每10次输出一次
-									LOG_WRN(
-										"PING pipe mismatch (x%u): id=%u, expected pipe=%u got pipe=%u",
-										pipe_mismatch_count[tracker_id],
-										tracker_id,
-										1 + (tracker_id % 7),
-										rx_payload.pipe
-									);
-								} else {
-									LOG_DBG(
-										"PING pipe mismatch: id=%u, expected pipe=%u got pipe=%u",
-										tracker_id,
-										1 + (tracker_id % 7),
-										rx_payload.pipe
-									);
-								}
-							}
+						bool is_duplicate = (counter_diff == 0);
+						bool is_out_of_order = false;
+						bool is_large_gap = false;
+						bool is_tracker_restart = false;
 
-							// check crc for PING
-							uint8_t crc_calc = crc8_ccitt(0x07, rx_payload.data, ESB_PING_LEN - 1);
-							if (rx_payload.data[ESB_PING_LEN - 1] != crc_calc) {
-								// CRC错误 - 只在连续多次错误时才输出WARNING
-								static uint8_t crc_error_count[MAX_TRACKERS] = {0};
-								crc_error_count[tracker_id]++;
+						// Detect out-of-order (backward jump) vs forward gap
+						// If diff > 128, it's likely a backward jump
+						// (out-of-order) BUT: if new counter is 0 or 1, it's
+						// likely a tracker restart Example: last=90, new=88 ->
+						// diff=254 (actually -2, out-of-order)
+						//          last=88, new=90 -> diff=2 (forward, normal
+						//          or small gap) last=220, new=5 -> diff=41
+						//          (forward, but wraps around at 256) last=14,
+						//          new=0 -> diff=242 (backward -14, but is
+						//          restart) last=17, new=0 -> diff=239
+						//          (backward -17, but is restart)
 
-								if (crc_error_count[tracker_id] % 5 == 1) {
-									// 每5次错误输出一次
-									LOG_WRN("PING CRC mismatch (x%u): id=%u expected %02X got %02X",
-										crc_error_count[tracker_id],
-										tracker_id,
-										crc_calc,
-										rx_payload.data[ESB_PING_LEN - 1]);
-								} else {
-									LOG_DBG("PING CRC mismatch: id=%u expected %02X got %02X",
-										tracker_id,
-										crc_calc,
-										rx_payload.data[ESB_PING_LEN - 1]);
-								}
-								break;
-							}
-
-							// 第一次收到该tracker的PING - 直接接受，不做顺序检查
-							if (!ping_counter_initialized[tracker_id]) {
-								ping_counter_initialized[tracker_id] = true;
-								last_ping_counter[tracker_id] = counter;
-								last_pong_queued_counter[tracker_id] = 0xFF;  // 标记未队列过
-								LOG_DBG(
-									"First PING from tracker %u, ctr=%u, initializing",
-									tracker_id,
-									counter
-								);
-								// 继续处理，发送PONG
-							} else {
-								// 已经初始化过，进行顺序检查
-								// Detect if this is a retransmission or duplicate PING
-								// This helps avoid queuing the same PONG multiple times
-								int counter_diff = (int)counter - (int)last_ping_counter[tracker_id];
-								if (counter_diff < 0) counter_diff += 256;  // Handle wrap-around
-
-								bool is_duplicate = (counter_diff == 0);
-								bool is_out_of_order = false;
-								bool is_large_gap = false;
-								bool is_tracker_restart = false;
-
-							// Detect out-of-order (backward jump) vs forward gap
-							// If diff > 128, it's likely a backward jump (out-of-order)
-							// BUT: if new counter is 0 or 1, it's likely a tracker restart
-							// Example: last=90, new=88 -> diff=254 (actually -2, out-of-order)
-							//          last=88, new=90 -> diff=2 (forward, normal or small gap)
-							//          last=220, new=5 -> diff=41 (forward, but wraps around at 256)
-							//          last=14, new=0 -> diff=242 (backward -14, but is restart)
-							//          last=17, new=0 -> diff=239 (backward -17, but is restart)
-
-							// 检测tracker重启：如果新counter是0或1，且不是正常递增（diff != 1）
-							// 这表明tracker重启了，counter从0重新开始
-							if ((counter == 0 || counter == 1) && counter_diff != 1) {
+						// 检测tracker重启：如果新counter是0或1，且不是正常递增（diff
+						// != 1） 这表明tracker重启了，counter从0重新开始
+						if ((counter == 0 || counter == 1) && counter_diff != 1) {
+							is_tracker_restart = true;
+							LOG_INF(
+								"Tracker restart detected (PING counter reset "
+								"to %u): id=%u old_ctr=%u",
+								counter,
+								tracker_id,
+								last_ping_counter[tracker_id]
+							);
+						} else if (counter_diff > 128) {
+							int backward_amount = 256 - counter_diff;
+							// 检测tracker重启：如果向后跳跃很大（>200），且新counter很小（<20）
+							if (backward_amount > 200 && counter < 20) {
 								is_tracker_restart = true;
 								LOG_INF(
-									"Tracker restart detected (PING counter reset to %u): id=%u old_ctr=%u",
-									counter,
+									"Tracker restart detected (large backward "
+									"jump): id=%u old_ctr=%u new_ctr=%u",
 									tracker_id,
-									last_ping_counter[tracker_id]
-								);
-							} else if (counter_diff > 128) {
-								int backward_amount = 256 - counter_diff;
-								// 检测tracker重启：如果向后跳跃很大（>200），且新counter很小（<20）
-								if (backward_amount > 200 && counter < 20) {
-									is_tracker_restart = true;
-									LOG_INF(
-										"Tracker restart detected (large backward jump): id=%u old_ctr=%u new_ctr=%u",
-										tracker_id,
-										last_ping_counter[tracker_id],
-										counter
-									);
-								} else {
-									// This is an out-of-order packet (old packet arriving late)
-									is_out_of_order = true;
-								}
-							} else if (counter_diff > 5) {
-								// Forward gap, possible packet loss
-								is_large_gap = true;
-							}								if (is_tracker_restart) {
-									// Tracker重启，重置counter追踪
-									last_ping_counter[tracker_id] = counter;
-									last_pong_queued_counter[tracker_id] = 0xFF;  // 重置PONG队列追踪
-									// 继续处理这个PING，发送PONG
-								} else if (is_duplicate) {
-								// Same counter as last time - likely a retransmit
-								// 降低到DEBUG级别
-								LOG_DBG(
-									"Duplicate PING detected: id=%u ctr=%u (retransmit or retry)",
-									tracker_id,
+									last_ping_counter[tracker_id],
 									counter
 								);
-
-								// Check if we already queued a PONG for this counter
-								if (counter == last_pong_queued_counter[tracker_id]) {
-									LOG_DBG(
-										"PONG already queued for ctr=%u, skipping duplicate queue",
-										counter
-									);
-									// Don't queue again, tracker will get PONG on next packet
-									break;
-								}
-							} else if (is_out_of_order) {
-								// Out-of-order PING - this is an old packet that arrived late
-								// Don't process it to avoid sending stale PONG
-								int backward_amount = 256 - counter_diff;
-								// 只在较大的乱序时才警告
-								if (backward_amount > 3) {
-									LOG_WRN(
-										"Out-of-order PING: id=%u ctr=%u (expected >%u, -%d backward), SKIPPING",
-										tracker_id,
-										counter,
-										last_ping_counter[tracker_id],
-										backward_amount
-									);
-								} else {
-									LOG_DBG(
-										"Minor out-of-order PING: id=%u ctr=%u (-%d), SKIPPING",
-										tracker_id,
-										counter,
-										backward_amount
-									);
-								}
-								// Don't update last_ping_counter, don't queue PONG
-								break;
-							} else if (is_large_gap) {
-								// Large gap detected - possible packet loss
-								// 只在gap很大时才警告
-								if (counter_diff > 10) {
-									LOG_WRN(
-										"Large PING counter gap: id=%u last=%u new=%u (gap=%d)",
-										tracker_id,
-										last_ping_counter[tracker_id],
-										counter,
-										counter_diff
-									);
-								}
-							}
-
-							// Update last seen counter (only if not out-of-order and not skipped)
-							if (!is_out_of_order) {
-								last_ping_counter[tracker_id] = counter;
-							}
-						}  // 结束 ping_counter_initialized 的 else 分支
-
-						// 检查追踪器是否确认收到了命令
-							if (ping_ack_flag != ESB_PONG_FLAG_NORMAL) {
-								// 追踪器已确认收到命令，清除本地命令标志
-								if (tracker_remote_command[tracker_id] == ping_ack_flag) {
-									tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
-									LOG_DBG(
-										"Tracker %u confirmed command 0x%02X, clearing flag",
-										tracker_id,
-										ping_ack_flag
-									);
-
-									// 如果是信道切换命令的确认，记录到掩码
-									if ((ping_ack_flag == ESB_PONG_FLAG_SET_CHANNEL ||
-									     ping_ack_flag == ESB_PONG_FLAG_CLEAR_CHANNEL) &&
-									    channel_change_pending) {
-										atomic_or(&channel_ack_mask, (1 << tracker_id));
-										uint8_t current_mask = atomic_get(&channel_ack_mask);
-										LOG_INF("Tracker %u confirmed channel change (%u/%u confirmed)",
-											tracker_id,
-											__builtin_popcount(current_mask),
-											stored_trackers);
-									}
-								}
-							}
-
-							// 在ISR中使用栈上的局部变量构建PONG，避免全局变量的数据竞争
-							// 每个PING事件都有自己独立的PONG payload
-							struct esb_payload pong = {
-								.noack = false,
-								.pipe = 1 + (tracker_id % 7),
-								.length = ESB_PONG_LEN
-							};
-
-							pong.data[0] = ESB_PONG_TYPE;
-							pong.data[1] = tracker_id;
-							pong.data[2] = counter;
-							pong.data[3] = (t_lo >> 24) & 0xFF;
-							pong.data[4] = (t_lo >> 16) & 0xFF;
-							pong.data[5] = (t_lo >> 8) & 0xFF;
-							pong.data[6] = (t_lo) & 0xFF;
-							pong.data[7] = tracker_remote_command[tracker_id];
-
-							// Fill data[8-11] based on command type
-							if (tracker_remote_command[tracker_id] == ESB_PONG_FLAG_SET_CHANNEL) {
-								// For SET_CHANNEL, use the channel value
-								pong.data[8] = (tracker_channel_value >> 24) & 0xFF;
-								pong.data[9] = (tracker_channel_value >> 16) & 0xFF;
-								pong.data[10] = (tracker_channel_value >> 8) & 0xFF;
-								pong.data[11] = (tracker_channel_value) & 0xFF;
 							} else {
-								// For other commands, use receiver cycle timestamp (high precision)
-								uint32_t rxt_cycles = k_cycle_get_32();
-								pong.data[8] = (rxt_cycles >> 24) & 0xFF;
-								pong.data[9] = (rxt_cycles >> 16) & 0xFF;
-								pong.data[10] = (rxt_cycles >> 8) & 0xFF;
-								pong.data[11] = (rxt_cycles) & 0xFF;
+								// This is an out-of-order packet (old packet
+								// arriving late)
+								is_out_of_order = true;
 							}
-							// Try to write ACK payload with robust error handling
-							pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
-							int werr = esb_write_payload(&pong);
+						} else if (counter_diff > 5) {
+							// Forward gap, possible packet loss
+							is_large_gap = true;
+						}
+						if (is_tracker_restart) {
+							// Tracker重启，重置counter追踪
+							last_ping_counter[tracker_id] = counter;
+							last_pong_queued_counter[tracker_id] = 0xFF; // 重置PONG队列追踪
+																		 // 继续处理这个PING，发送PONG
+						} else if (is_duplicate) {
+							// Same counter as last time - likely a retransmit
+							// 降低到DEBUG级别
+							LOG_DBG(
+								"Duplicate PING detected: id=%u ctr=%u "
+								"(retransmit or retry)",
+								tracker_id,
+								counter
+							);
 
-							if (werr == 0) {
-								// Success - mark this counter as queued
-								last_pong_queued_counter[tracker_id] = counter;
+							// Check if we already queued a PONG for this
+							// counter
+							if (counter == last_pong_queued_counter[tracker_id]) {
 								LOG_DBG(
-									"ACK payload queued: PONG id=%u ctr=%u pipe=%u cmd=0x%02X",
+									"PONG already queued for ctr=%u, skipping "
+									"duplicate queue",
+									counter
+								);
+								// Don't queue again, tracker will get PONG on
+								// next packet
+								break;
+							}
+						} else if (is_out_of_order) {
+							// Out-of-order PING - this is an old packet that
+							// arrived late Don't process it to avoid sending
+							// stale PONG
+							int backward_amount = 256 - counter_diff;
+							// 只在较大的乱序时才警告
+							if (backward_amount > 3) {
+								LOG_WRN(
+									"Out-of-order PING: id=%u ctr=%u (expected "
+									">%u, -%d backward), SKIPPING",
 									tracker_id,
 									counter,
-									pong.pipe,
-									tracker_remote_command[tracker_id]
+									last_ping_counter[tracker_id],
+									backward_amount
 								);
 							} else {
-								// Failed - determine error type and handle appropriately
-								const char* err_str = "unknown";
-								bool should_retry = false;
-
-								if (werr == -ENOMEM) {
-									err_str = "ENOMEM (ESB not ready)";
-									should_retry = false;  // ESB not initialized, retry won't help
-								} else if (werr == -ENOSPC) {
-									err_str = "ENOSPC (TX FIFO full)";
-									should_retry = true;  // FIFO full, flush and retry
-								} else if (werr == -EAGAIN) {
-									err_str = "EAGAIN (busy)";
-									should_retry = true;
-								} else if (werr == -EINVAL) {
-									err_str = "EINVAL (invalid payload)";
-									should_retry = false;  // Invalid payload, retry won't help
-								}
-
-								// 只在DEBUG级别记录单次失败，减少日志噪音
-								// 严重错误（如EINVAL）仍然用WARNING
-								if (werr == -EINVAL || werr == -ENOMEM) {
-									LOG_WRN(
-										"Failed to queue ACK PONG id=%u ctr=%u: err=%d (%s)",
-										tracker_id,
-										counter,
-										werr,
-										err_str
-									);
-								} else {
-									LOG_DBG(
-										"Failed to queue ACK PONG id=%u ctr=%u: err=%d (%s)",
-										tracker_id,
-										counter,
-										werr,
-										err_str
-									);
-								}
-
-								// Retry logic for recoverable errors
-								if (should_retry) {
-									// Clear TX queue to make room
-									esb_flush_tx();
-									LOG_DBG("Flushed TX, retrying ACK payload");
-
-									// Brief delay to let hardware settle
-									k_busy_wait(100);  // 100us delay
-
-									// Retry once
-									werr = esb_write_payload(&pong);
-									if (werr == 0) {
-										last_pong_queued_counter[tracker_id] = counter;
-										LOG_DBG("ACK payload queued successfully after retry");
-									} else {
-										// 重试失败才记录错误
-										LOG_ERR(
-											"ACK payload retry also failed: err=%d, tracker may miss PONG",
-											werr
-										);
-										// Don't increment failed_pongs again, already counted above
-									}
-								}
+								LOG_DBG(
+									"Minor out-of-order PING: id=%u ctr=%u "
+									"(-%d), SKIPPING",
+									tracker_id,
+									counter,
+									backward_amount
+								);
+							}
+							// Don't update last_ping_counter, don't queue PONG
+							break;
+						} else if (is_large_gap) {
+							// Large gap detected - possible packet loss
+							// 只在gap很大时才警告
+							if (counter_diff > 10) {
+								LOG_WRN(
+									"Large PING counter gap: id=%u last=%u "
+									"new=%u (gap=%d)",
+									tracker_id,
+									last_ping_counter[tracker_id],
+									counter,
+									counter_diff
+								);
 							}
 						}
-					} break;
-					case 17:  // 16 bytes data + 1 byte sequence number
-					{
-						uint8_t imu_id = rx_payload.data[1];
-						if (imu_id >= stored_trackers) {  // not a stored tracker
-							continue;
+
+						// Update last seen counter (only if not out-of-order
+						// and not skipped)
+						if (!is_out_of_order) {
+							last_ping_counter[tracker_id] = counter;
+						}
+					} // 结束 ping_counter_initialized 的 else 分支
+
+					// 检查追踪器是否确认收到了命令
+					if (ping_ack_flag != ESB_PONG_FLAG_NORMAL) {
+						// 追踪器已确认收到命令，清除本地命令标志
+						if (tracker_remote_command[tracker_id] == ping_ack_flag) {
+							tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
+							LOG_DBG(
+								"Tracker %u confirmed command 0x%02X, clearing "
+								"flag",
+								tracker_id,
+								ping_ack_flag
+							);
+
+							// 如果是信道切换命令的确认，记录到掩码
+							if ((ping_ack_flag == ESB_PONG_FLAG_SET_CHANNEL
+								 || ping_ack_flag == ESB_PONG_FLAG_CLEAR_CHANNEL)
+								&& channel_change_pending) {
+								atomic_or(&channel_ack_mask, (1 << tracker_id));
+								uint8_t current_mask = atomic_get(&channel_ack_mask);
+								LOG_INF(
+									"Tracker %u confirmed channel change "
+									"(%u/%u confirmed)",
+									tracker_id,
+									__builtin_popcount(current_mask),
+									stored_trackers
+								);
+							}
+						}
+					}
+
+					// 在ISR中使用栈上的局部变量构建PONG，避免全局变量的数据竞争
+					// 每个PING事件都有自己独立的PONG payload
+					struct esb_payload pong = {.noack = false, .pipe = 1 + (tracker_id % 7), .length = ESB_PONG_LEN};
+
+					pong.data[0] = ESB_PONG_TYPE;
+					pong.data[1] = tracker_id;
+					pong.data[2] = counter;
+					pong.data[3] = (t_lo >> 24) & 0xFF;
+					pong.data[4] = (t_lo >> 16) & 0xFF;
+					pong.data[5] = (t_lo >> 8) & 0xFF;
+					pong.data[6] = (t_lo) & 0xFF;
+					pong.data[7] = tracker_remote_command[tracker_id];
+
+					// Fill data[8-11] based on command type
+					if (tracker_remote_command[tracker_id] == ESB_PONG_FLAG_SET_CHANNEL) {
+						// For SET_CHANNEL, use the channel value
+						pong.data[8] = (tracker_channel_value >> 24) & 0xFF;
+						pong.data[9] = (tracker_channel_value >> 16) & 0xFF;
+						pong.data[10] = (tracker_channel_value >> 8) & 0xFF;
+						pong.data[11] = (tracker_channel_value) & 0xFF;
+					} else {
+						// For other commands, use receiver cycle timestamp
+						// (high precision)
+						uint32_t rxt_cycles = k_cycle_get_32();
+						pong.data[8] = (rxt_cycles >> 24) & 0xFF;
+						pong.data[9] = (rxt_cycles >> 16) & 0xFF;
+						pong.data[10] = (rxt_cycles >> 8) & 0xFF;
+						pong.data[11] = (rxt_cycles) & 0xFF;
+					}
+					// Try to write ACK payload with robust error handling
+					pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
+					esb_flush_tx();
+					int werr = esb_write_payload(&pong);
+
+					if (werr == 0) {
+						// Success - mark this counter as queued
+						last_pong_queued_counter[tracker_id] = counter;
+						LOG_DBG(
+							"ACK payload queued: PONG id=%u ctr=%u pipe=%u "
+							"cmd=0x%02X",
+							tracker_id,
+							counter,
+							pong.pipe,
+							tracker_remote_command[tracker_id]
+						);
+					} else {
+						// Failed - determine error type and handle
+						// appropriately
+						const char *err_str = "unknown";
+						bool should_retry = false;
+
+						if (werr == -ENOMEM) {
+							err_str = "ENOMEM (ESB not ready)";
+							should_retry = false; // ESB not initialized, retry
+												  // won't help
+						} else if (werr == -ENOSPC) {
+							err_str = "ENOSPC (TX FIFO full)";
+							should_retry = true; // FIFO full, flush and retry
+						} else if (werr == -EAGAIN) {
+							err_str = "EAGAIN (busy)";
+							should_retry = true;
+						} else if (werr == -EINVAL) {
+							err_str = "EINVAL (invalid payload)";
+							should_retry = false; // Invalid payload, retry won't help
 						}
 
-						if (rx_payload.data[0] > 223) {  // reserved for receiver only
-							break;
+						// 只在DEBUG级别记录单次失败，减少日志噪音
+						// 严重错误（如EINVAL）仍然用WARNING
+						if (werr == -EINVAL || werr == -ENOMEM) {
+							LOG_WRN(
+								"Failed to queue ACK PONG id=%u ctr=%u: err=%d "
+								"(%s)",
+								tracker_id,
+								counter,
+								werr,
+								err_str
+							);
+						} else {
+							LOG_DBG(
+								"Failed to queue ACK PONG id=%u ctr=%u: err=%d "
+								"(%s)",
+								tracker_id,
+								counter,
+								werr,
+								err_str
+							);
 						}
 
-						uint8_t received_sequence = rx_payload.data[16];
-						int seq_result
-							= check_packet_sequence(imu_id, received_sequence);
+						// Retry logic for recoverable errors
+						if (should_retry) {
+							// Clear TX queue to make room
+							esb_flush_tx();
+							LOG_DBG("Flushed TX, retrying ACK payload");
 
-						// 根据序号检查结果决定是否转发数据包
-						// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
-						if (seq_result == 4) {
-							LOG_DBG("TRK %d: Duplicate packet seq=%d, dropped", imu_id, received_sequence);
-							break;  // 丢弃重复包
-						}
-						if (seq_result == 2) {
-							LOG_DBG("TRK %d: Out-of-order packet seq=%d, dropped", imu_id, received_sequence);
-							break;  // 丢弃乱序包，避免姿态计算错误
-						}
+							// Brief delay to let hardware settle
+							k_busy_wait(100); // 100us delay
 
-						// 其他情况（正常、丢包、重启）都转发数据包
-						hid_write_packet_n(
-							rx_payload.data,
-							rx_payload.rssi
-						);  // write to hid endpoint
-					} break;
-					case 16:  // legacy format without sequence number
-					{
-						uint8_t imu_id = rx_payload.data[1];
-						if (imu_id >= stored_trackers) {  // not a stored tracker
-							continue;
+							// Retry once
+							werr = esb_write_payload(&pong);
+							if (werr == 0) {
+								last_pong_queued_counter[tracker_id] = counter;
+								LOG_DBG(
+									"ACK payload queued successfully after "
+									"retry"
+								);
+							} else {
+								// 重试失败才记录错误
+								LOG_ERR(
+									"ACK payload retry also failed: err=%d, "
+									"tracker may miss PONG",
+									werr
+								);
+								// Don't increment failed_pongs again, already
+								// counted above
+							}
 						}
-
-						if (rx_payload.data[0] > 223) {  // reserved for receiver only
-							break;
-						}
-						hid_write_packet_n(
-							rx_payload.data,
-							rx_payload.rssi
-						);  // write to hid endpoint
-					} break;
-					default:
-						LOG_ERR("Wrong packet length: %d", rx_payload.length);
-						break;
+					}
 				}
+			} break;
+			case 17: // 16 bytes data + 1 byte sequence number
+			{
+				uint8_t imu_id = rx_payload.data[1];
+				if (imu_id >= stored_trackers) { // not a stored tracker
+					continue;
+				}
+
+				if (rx_payload.data[0] > 223) { // reserved for receiver only
+					break;
+				}
+
+				uint8_t received_sequence = rx_payload.data[16];
+				int seq_result = check_packet_sequence(imu_id, received_sequence);
+
+				// 根据序号检查结果决定是否转发数据包
+				// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
+				if (seq_result == 4) {
+					LOG_DBG("TRK %d: Duplicate packet seq=%d, dropped", imu_id, received_sequence);
+					break; // 丢弃重复包
+				}
+				if (seq_result == 2) {
+					LOG_DBG("TRK %d: Out-of-order packet seq=%d, dropped", imu_id, received_sequence);
+					break; // 丢弃乱序包，避免姿态计算错误
+				}
+
+				// 其他情况（正常、丢包、重启）都转发数据包
+				hid_write_packet_n(rx_payload.data,
+								   rx_payload.rssi); // write to hid endpoint
+			} break;
+			case 16: // legacy format without sequence number
+			{
+				uint8_t imu_id = rx_payload.data[1];
+				if (imu_id >= stored_trackers) { // not a stored tracker
+					continue;
+				}
+
+				if (rx_payload.data[0] > 223) { // reserved for receiver only
+					break;
+				}
+				hid_write_packet_n(rx_payload.data,
+								   rx_payload.rssi); // write to hid endpoint
+			} break;
+			default:
+				LOG_ERR("Wrong packet length: %d", rx_payload.length);
+				break;
 			}
-		} break;
+		}
+	} break;
 	}
 }
 
-int clocks_start(void) {
+int clocks_start(void)
+{
 	int err;
 	int res;
-	struct onoff_manager* clk_mgr;
+	struct onoff_manager *clk_mgr;
 	struct onoff_client clk_cli;
 	int fetch_attempts = 0;
 
@@ -881,14 +893,14 @@ int clocks_start(void) {
 // TODO: I have no idea?
 static const uint8_t discovery_base_addr_0[4] = {0x62, 0x39, 0x8A, 0xF2};
 static const uint8_t discovery_base_addr_1[4] = {0x28, 0xFF, 0x50, 0xB8};
-static const uint8_t discovery_addr_prefix[8]
-	= {0xFE, 0xFF, 0x29, 0x27, 0x09, 0x02, 0xB2, 0xD6};
+static const uint8_t discovery_addr_prefix[8] = {0xFE, 0xFF, 0x29, 0x27, 0x09, 0x02, 0xB2, 0xD6};
 
 static uint8_t base_addr_0[4], base_addr_1[4], addr_prefix[8] = {0};
 
 static bool esb_initialized = false;
 
-int esb_initialize(bool tx) {
+int esb_initialize(bool tx)
+{
 	if (esb_initialized) {
 		LOG_WRN("ESB already initialized");
 	}
@@ -956,12 +968,13 @@ int esb_initialize(bool tx) {
 	return 0;
 }
 
-static void esb_deinitialize(void) {
+static void esb_deinitialize(void)
+{
 	LOG_INF("ESB deinitialize requested");
 	if (esb_initialized) {
 		esb_initialized = false;
 		LOG_INF("Deinitializing ESB");
-		k_msleep(10);  // wait for pending transmissions
+		k_msleep(10); // wait for pending transmissions
 		if (esb_initialized) {
 			LOG_INF("ESB denitialize cancelled");
 			return;
@@ -971,18 +984,18 @@ static void esb_deinitialize(void) {
 	esb_initialized = false;
 }
 
-inline void esb_set_addr_discovery(void) {
+inline void esb_set_addr_discovery(void)
+{
 	memcpy(base_addr_0, discovery_base_addr_0, sizeof(base_addr_0));
 	memcpy(base_addr_1, discovery_base_addr_1, sizeof(base_addr_1));
 	memcpy(addr_prefix, discovery_addr_prefix, sizeof(addr_prefix));
 }
 
-inline void esb_set_addr_paired(void) {
+inline void esb_set_addr_paired(void)
+{
 	// Generate addresses from device address
-	uint64_t* addr
-		= (uint64_t*)NRF_FICR
-			  ->DEVICEADDR;  // Use device address as unique identifier (although it is
-							 // not actually guaranteed, see datasheet)
+	uint64_t *addr = (uint64_t *)NRF_FICR->DEVICEADDR; // Use device address as unique identifier (although it is
+													   // not actually guaranteed, see datasheet)
 	uint8_t buf[6] = {0};
 	memcpy(buf, addr, 6);
 	uint8_t addr_buffer[16] = {0};
@@ -995,7 +1008,7 @@ inline void esb_set_addr_paired(void) {
 	}
 	for (int i = 0; i < 16; i++) {
 		if (addr_buffer[i] == 0x00 || addr_buffer[i] == 0x55
-			|| addr_buffer[i] == 0xAA) {  // Avoid invalid addresses (see nrf datasheet)
+			|| addr_buffer[i] == 0xAA) { // Avoid invalid addresses (see nrf datasheet)
 			addr_buffer[i] += 8;
 		}
 	}
@@ -1008,7 +1021,8 @@ static bool esb_pairing = false;
 static bool esb_paired = false;
 static bool esb_clearing = false;
 
-int esb_add_pair(uint64_t addr, bool checksum) {
+int esb_add_pair(uint64_t addr, bool checksum)
+{
 	if (addr == 0) {
 		return -EINVAL;
 	}
@@ -1040,12 +1054,7 @@ int esb_add_pair(uint64_t addr, bool checksum) {
 
 	if (new_entry) {
 		LOG_INF("Added device on id %d with address %012llX", assigned_id, addr);
-		sys_write(
-			STORED_ADDR_0 + assigned_id,
-			NULL,
-			&stored_tracker_addr[assigned_id],
-			sizeof(stored_tracker_addr[0])
-		);
+		sys_write(STORED_ADDR_0 + assigned_id, NULL, &stored_tracker_addr[assigned_id], sizeof(stored_tracker_addr[0]));
 		sys_write(STORED_TRACKERS, NULL, &stored_trackers, sizeof(stored_trackers));
 	} else {
 		LOG_INF("Device already stored with id %d", assigned_id);
@@ -1058,20 +1067,19 @@ int esb_add_pair(uint64_t addr, bool checksum) {
 		if (checksum_byte == 0) {
 			checksum_byte = 8;
 		}
-		uint64_t* receiver_addr
-			= (uint64_t*)NRF_FICR
-				  ->DEVICEADDR;  // Use device address as unique identifier (although it
-								 // is not actually guaranteed, see datasheet
+		uint64_t *receiver_addr = (uint64_t *)NRF_FICR->DEVICEADDR; // Use device address as unique identifier (although
+																	// it is not actually guaranteed, see datasheet
 		uint64_t pair_addr = (*receiver_addr & 0xFFFFFFFFFFFF) << 16;
-		pair_addr |= checksum_byte;  // Add checksum to the address
-		pair_addr |= (uint64_t)assigned_id << 8;  // Add tracker id to the address
+		pair_addr |= checksum_byte;              // Add checksum to the address
+		pair_addr |= (uint64_t)assigned_id << 8; // Add tracker id to the address
 		LOG_INF("Pair the device with %016llX", pair_addr);
 	}
 
 	return assigned_id;
 }
 
-void esb_pop_pair(void) {
+void esb_pop_pair(void)
+{
 	uint64_t removed_addr = 0;
 	int removed_id = -1;
 
@@ -1086,23 +1094,15 @@ void esb_pop_pair(void) {
 
 	if (removed_id >= 0) {
 		sys_write(STORED_TRACKERS, NULL, &stored_trackers, sizeof(stored_trackers));
-		sys_write(
-			STORED_ADDR_0 + removed_id,
-			NULL,
-			&stored_tracker_addr[removed_id],
-			sizeof(stored_tracker_addr[0])
-		);
-		LOG_INF(
-			"Removed device on id %d with address %012llX",
-			removed_id,
-			removed_addr
-		);
+		sys_write(STORED_ADDR_0 + removed_id, NULL, &stored_tracker_addr[removed_id], sizeof(stored_tracker_addr[0]));
+		LOG_INF("Removed device on id %d with address %012llX", removed_id, removed_addr);
 	} else {
 		LOG_WRN("No devices to remove");
 	}
 }
 
-static bool esb_parse_pair(const uint8_t packet[8]) {
+static bool esb_parse_pair(const uint8_t packet[8])
+{
 	uint64_t raw_addr = 0;
 	memcpy(&raw_addr, packet, sizeof(raw_addr));
 	uint64_t found_addr = (raw_addr >> 16) & 0xFFFFFFFFFFFF;
@@ -1116,7 +1116,7 @@ static bool esb_parse_pair(const uint8_t packet[8]) {
 
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	tracker_count_snapshot = stored_trackers;
-	send_tracker_id = tracker_count_snapshot;  // default to next available ID
+	send_tracker_id = tracker_count_snapshot; // default to next available ID
 	for (uint8_t i = 0; i < tracker_count_snapshot; i++) {
 		if (found_addr != 0 && stored_tracker_addr[i] == found_addr) {
 			send_tracker_id = i;
@@ -1127,8 +1127,7 @@ static bool esb_parse_pair(const uint8_t packet[8]) {
 
 	bool checksum_valid = (checksum == packet[0]);
 	bool has_capacity = tracker_count_snapshot < MAX_TRACKERS;
-	bool is_new_device = checksum_valid && found_addr != 0
-					  && send_tracker_id == tracker_count_snapshot && has_capacity;
+	bool is_new_device = checksum_valid && found_addr != 0 && send_tracker_id == tracker_count_snapshot && has_capacity;
 	bool ack_valid = false;
 
 	if (is_new_device) {
@@ -1139,30 +1138,26 @@ static bool esb_parse_pair(const uint8_t packet[8]) {
 		} else if (assigned_id == -ENOSPC) {
 			LOG_WRN("Maximum tracker slots reached, cannot pair %012llX", found_addr);
 		} else {
-			LOG_ERR(
-				"Failed to store tracker address %012llX: %d",
-				found_addr,
-				assigned_id
-			);
+			LOG_ERR("Failed to store tracker address %012llX: %d", found_addr, assigned_id);
 		}
 	}
 
 	ack_valid = checksum_valid && send_tracker_id < MAX_TRACKERS;
 
 	tx_payload_pair.data[0] = ack_valid ? packet[0] : 0;
-	tx_payload_pair.data[1]
-		= (send_tracker_id < MAX_TRACKERS) ? (uint8_t)send_tracker_id : 0xFF;
+	tx_payload_pair.data[1] = (send_tracker_id < MAX_TRACKERS) ? (uint8_t)send_tracker_id : 0xFF;
 
 	return ack_valid;
 }
 
-void esb_start_pairing(void) {
+void esb_start_pairing(void)
+{
 	LOG_INF("Starting pairing mode (non-blocking)");
 	esb_set_addr_discovery();
 	esb_initialize(false);
 	esb_start_rx();
 	tx_payload_pair.noack = false;
-	uint64_t* addr = (uint64_t*)NRF_FICR->DEVICEADDR;
+	uint64_t *addr = (uint64_t *)NRF_FICR->DEVICEADDR;
 	memcpy(&tx_payload_pair.data[2], addr, 6);
 	LOG_INF("Device address: %012llX", *addr & 0xFFFFFFFFFFFF);
 	set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
@@ -1170,16 +1165,15 @@ void esb_start_pairing(void) {
 	k_msgq_purge(&esb_pairing_msgq);
 }
 
-void esb_pair(void) {
+void esb_pair(void)
+{
 	LOG_INF("Pairing");
 	esb_set_addr_discovery();
 	esb_initialize(false);
 	esb_start_rx();
 	tx_payload_pair.noack = false;
-	uint64_t* addr
-		= (uint64_t*)NRF_FICR
-			  ->DEVICEADDR;  // Use device address as unique identifier (although it is
-							 // not actually guaranteed, see datasheet)
+	uint64_t *addr = (uint64_t *)NRF_FICR->DEVICEADDR; // Use device address as unique identifier (although it is
+													   // not actually guaranteed, see datasheet)
 	memcpy(&tx_payload_pair.data[2], addr, 6);
 	LOG_INF("Device address: %012llX", *addr & 0xFFFFFFFFFFFF);
 	set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
@@ -1198,50 +1192,53 @@ void esb_pair(void) {
 		}
 
 		switch (evt.packet[1]) {
-			case 0: {
-				bool ack_ready = esb_parse_pair(evt.packet);
-				if (!ack_ready) {
-					LOG_DBG("Pairing request invalid, not queueing response");
-					break;
-				}
-				int tx_err = esb_write_payload(&tx_payload_pair);
-				if (tx_err == -ENOSPC) {
-					esb_flush_tx();
-					tx_err = esb_write_payload(&tx_payload_pair);
-				}
-				if (tx_err) {
-					LOG_ERR("Failed to queue pairing response: %d", tx_err);
-				} else {
-					LOG_DBG("tx: %16llX", *(uint64_t*)tx_payload_pair.data);
-				}
+		case 0: {
+			bool ack_ready = esb_parse_pair(evt.packet);
+			if (!ack_ready) {
+				LOG_DBG("Pairing request invalid, not queueing response");
 				break;
 			}
-			case 2:
+			int tx_err = esb_write_payload(&tx_payload_pair);
+			if (tx_err == -ENOSPC) {
 				esb_flush_tx();
-				break;
-			case 1:
-				// Tracker acknowledged previous response, nothing to do
-				break;
-			default:
-				LOG_WRN("Unhandled pairing packet type %u", evt.packet[1]);
-				break;
+				tx_err = esb_write_payload(&tx_payload_pair);
+			}
+			if (tx_err) {
+				LOG_ERR("Failed to queue pairing response: %d", tx_err);
+			} else {
+				LOG_DBG("tx: %16llX", *(uint64_t *)tx_payload_pair.data);
+			}
+			break;
+		}
+		case 2:
+			esb_flush_tx();
+			break;
+		case 1:
+			// Tracker acknowledged previous response, nothing to do
+			break;
+		default:
+			LOG_WRN("Unhandled pairing packet type %u", evt.packet[1]);
+			break;
 		}
 	}
 	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_CONNECTION);
 	esb_deinitialize();
 }
 
-void esb_reset_pair(void) {
-	esb_deinitialize();  // make sure esb is off
+void esb_reset_pair(void)
+{
+	esb_deinitialize(); // make sure esb is off
 	esb_paired = false;
 }
 
-void esb_finish_pair(void) {
+void esb_finish_pair(void)
+{
 	esb_pairing = false;
 	k_msgq_purge(&esb_pairing_msgq);
 }
 
-void esb_clear(void) {
+void esb_clear(void)
+{
 	esb_clearing = true;
 
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
@@ -1252,12 +1249,7 @@ void esb_clear(void) {
 
 	sys_write(STORED_TRACKERS, NULL, &stored_trackers, sizeof(stored_trackers));
 	for (uint8_t i = 0; i < previous_count && i < MAX_TRACKERS; i++) {
-		sys_write(
-			STORED_ADDR_0 + i,
-			NULL,
-			&stored_tracker_addr[i],
-			sizeof(stored_tracker_addr[0])
-		);
+		sys_write(STORED_ADDR_0 + i, NULL, &stored_tracker_addr[i], sizeof(stored_tracker_addr[0]));
 	}
 	LOG_INF("NVS Reset");
 
@@ -1279,7 +1271,8 @@ void esb_clear(void) {
 }
 
 // 重置特定追踪器的包序号状态
-void esb_reset_tracker_sequence(uint8_t tracker_id) {
+void esb_reset_tracker_sequence(uint8_t tracker_id)
+{
 	if (tracker_id < MAX_TRACKERS) {
 		last_packet_sequence[tracker_id] = 0;
 		packet_count[tracker_id] = 0;
@@ -1291,64 +1284,17 @@ void esb_reset_tracker_sequence(uint8_t tracker_id) {
 		memset(&tracker_stats[tracker_id], 0, sizeof(struct packet_stats));
 		// 重置RSSI平滑状态
 		hid_reset_rssi_smooth(tracker_id);
-		LOG_INF(
-			"Packet sequence state and statistics reset for tracker %d",
-			tracker_id
-		);
+		LOG_INF("Packet sequence state and statistics reset for tracker %d", tracker_id);
 	}
 }
 
 // 发送远程命令到指定追踪器
-void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag) {
+void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
+{
 	if (tracker_id < MAX_TRACKERS) {
 		tracker_remote_command[tracker_id] = command_flag;
-		const char* cmd_name = "UNKNOWN";
+		const char *cmd_name = "UNKNOWN";
 		switch (command_flag) {
-			case ESB_PONG_FLAG_NORMAL:
-				cmd_name = "NORMAL";
-				break;
-			case ESB_PONG_FLAG_SHUTDOWN:
-				cmd_name = "SHUTDOWN";
-				break;
-			case ESB_PONG_FLAG_CALIBRATE:
-				cmd_name = "CALIBRATE";
-				break;
-			case ESB_PONG_FLAG_SIX_SIDE_CAL:
-				cmd_name = "SIX_SIDE_CAL";
-				break;
-			case ESB_PONG_FLAG_MEOW:
-				cmd_name = "MEOW";
-				break;
-			case ESB_PONG_FLAG_SCAN:
-				cmd_name = "SCAN";
-				break;
-			case ESB_PONG_FLAG_MAG_CLEAR:
-				cmd_name = "MAG_CLEAR";
-				break;
-			case ESB_PONG_FLAG_REBOOT:
-				cmd_name = "REBOOT";
-				break;
-			case ESB_PONG_FLAG_CLEAR:
-				cmd_name = "CLEAR";
-				break;
-			case ESB_PONG_FLAG_DFU:
-				cmd_name = "DFU";
-				break;
-			case ESB_PONG_FLAG_SET_CHANNEL:
-				cmd_name = "SET_CHANNEL";
-				break;
-		}
-		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", cmd_name, command_flag, tracker_id);
-	} else {
-		LOG_ERR("Invalid tracker ID: %d", tracker_id);
-	}
-}
-
-// 发送远程命令到所有已配对的追踪器
-void esb_send_remote_command_all(uint8_t command_flag) {
-	uint8_t count = 0;
-	const char* cmd_name = "UNKNOWN";
-	switch (command_flag) {
 		case ESB_PONG_FLAG_NORMAL:
 			cmd_name = "NORMAL";
 			break;
@@ -1382,6 +1328,52 @@ void esb_send_remote_command_all(uint8_t command_flag) {
 		case ESB_PONG_FLAG_SET_CHANNEL:
 			cmd_name = "SET_CHANNEL";
 			break;
+		}
+		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", cmd_name, command_flag, tracker_id);
+	} else {
+		LOG_ERR("Invalid tracker ID: %d", tracker_id);
+	}
+}
+
+// 发送远程命令到所有已配对的追踪器
+void esb_send_remote_command_all(uint8_t command_flag)
+{
+	uint8_t count = 0;
+	const char *cmd_name = "UNKNOWN";
+	switch (command_flag) {
+	case ESB_PONG_FLAG_NORMAL:
+		cmd_name = "NORMAL";
+		break;
+	case ESB_PONG_FLAG_SHUTDOWN:
+		cmd_name = "SHUTDOWN";
+		break;
+	case ESB_PONG_FLAG_CALIBRATE:
+		cmd_name = "CALIBRATE";
+		break;
+	case ESB_PONG_FLAG_SIX_SIDE_CAL:
+		cmd_name = "SIX_SIDE_CAL";
+		break;
+	case ESB_PONG_FLAG_MEOW:
+		cmd_name = "MEOW";
+		break;
+	case ESB_PONG_FLAG_SCAN:
+		cmd_name = "SCAN";
+		break;
+	case ESB_PONG_FLAG_MAG_CLEAR:
+		cmd_name = "MAG_CLEAR";
+		break;
+	case ESB_PONG_FLAG_REBOOT:
+		cmd_name = "REBOOT";
+		break;
+	case ESB_PONG_FLAG_CLEAR:
+		cmd_name = "CLEAR";
+		break;
+	case ESB_PONG_FLAG_DFU:
+		cmd_name = "DFU";
+		break;
+	case ESB_PONG_FLAG_SET_CHANNEL:
+		cmd_name = "SET_CHANNEL";
+		break;
 	}
 
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
@@ -1397,14 +1389,16 @@ void esb_send_remote_command_all(uint8_t command_flag) {
 }
 
 // 手动打印所有活跃追踪器的统计信息
-void esb_print_all_stats(void) {
+void esb_print_all_stats(void)
+{
 	LOG_INF("=== Packet Statistics Summary ===");
 	print_tracker_stats_batch();
 	LOG_INF("================================");
 }
 
 // 重置所有追踪器的统计信息
-void esb_reset_all_stats(void) {
+void esb_reset_all_stats(void)
+{
 	for (int i = 0; i < MAX_TRACKERS; i++) {
 		memset(&tracker_stats[i], 0, sizeof(struct packet_stats));
 		// 同时重置PING counter跟踪状态
@@ -1417,7 +1411,8 @@ void esb_reset_all_stats(void) {
 }
 
 // 设置所有追踪器的 RF 信道
-void esb_set_all_trackers_channel(uint8_t channel) {
+void esb_set_all_trackers_channel(uint8_t channel)
+{
 	if (channel > 100) {
 		LOG_ERR("Invalid channel value: %u (must be 0-100)", channel);
 		return;
@@ -1439,13 +1434,14 @@ void esb_set_all_trackers_channel(uint8_t channel) {
 }
 
 // 清除所有追踪器的RF信道设置（恢复默认）
-void esb_clear_all_trackers_channel(void) {
+void esb_clear_all_trackers_channel(void)
+{
 	if (channel_change_pending) {
 		LOG_WRN("Channel change already in progress, please wait");
 		return;
 	}
 
-	pending_channel = 0xFF;  // Special value to indicate clearing
+	pending_channel = 0xFF; // Special value to indicate clearing
 	channel_change_pending = true;
 	atomic_set(&channel_ack_mask, 0);
 	channel_change_timeout = k_uptime_get() + CHANNEL_CHANGE_TIMEOUT_MS;
@@ -1455,7 +1451,8 @@ void esb_clear_all_trackers_channel(void) {
 }
 
 // 设置接收器的RF信道（本地，不影响tracker）
-void esb_set_receiver_channel(uint8_t channel) {
+void esb_set_receiver_channel(uint8_t channel)
+{
 	if (channel > 100) {
 		LOG_ERR("Invalid channel value: %u (must be 0-100)", channel);
 		return;
@@ -1476,7 +1473,8 @@ void esb_set_receiver_channel(uint8_t channel) {
 }
 
 // 清除接收器的RF信道设置（本地，不影响tracker）
-void esb_clear_receiver_channel(void) {
+void esb_clear_receiver_channel(void)
+{
 	LOG_INF("Clearing receiver RF channel (local only)");
 	receiver_rf_channel = 0xFF;
 
@@ -1492,12 +1490,14 @@ void esb_clear_receiver_channel(void) {
 }
 
 // 获取接收器的RF信道
-uint8_t esb_get_receiver_channel(void) {
+uint8_t esb_get_receiver_channel(void)
+{
 	return receiver_rf_channel;
 }
 
 // TODO:
-void esb_write_sync(uint16_t led_clock) {
+void esb_write_sync(uint16_t led_clock)
+{
 	if (!esb_initialized || !esb_paired) {
 		return;
 	}
@@ -1508,23 +1508,21 @@ void esb_write_sync(uint16_t led_clock) {
 }
 
 // TODO:
-void esb_receive(void) {
+void esb_receive(void)
+{
 	esb_set_addr_paired();
 	esb_paired = true;
 }
 
-static void esb_thread(void) {
+static void esb_thread(void)
+{
 	clocks_start();
 
 	sys_read(STORED_TRACKERS, &stored_trackers, sizeof(stored_trackers));
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	uint8_t tracker_count = stored_trackers;
 	for (uint8_t i = 0; i < tracker_count && i < MAX_TRACKERS; i++) {
-		sys_read(
-			STORED_ADDR_0 + i,
-			&stored_tracker_addr[i],
-			sizeof(stored_tracker_addr[0])
-		);
+		sys_read(STORED_ADDR_0 + i, &stored_tracker_addr[i], sizeof(stored_tracker_addr[0]));
 	}
 	k_mutex_unlock(&tracker_store_lock);
 
@@ -1566,7 +1564,7 @@ static void esb_thread(void) {
 
 		// Check if channel change is complete
 		if (channel_change_pending) {
-			uint8_t expected_mask = (1 << stored_trackers) - 1;  // 所有tracker都应确认
+			uint8_t expected_mask = (1 << stored_trackers) - 1; // 所有tracker都应确认
 			uint8_t current_mask = atomic_get(&channel_ack_mask);
 			int64_t now = k_uptime_get();
 
@@ -1605,10 +1603,13 @@ static void esb_thread(void) {
 				channel_change_pending = false;
 			} else if (now >= channel_change_timeout) {
 				// Timeout, cancel channel change
-				LOG_WRN("Channel change timeout, %u/%u trackers confirmed",
-					__builtin_popcount(current_mask), stored_trackers);
+				LOG_WRN(
+					"Channel change timeout, %u/%u trackers confirmed",
+					__builtin_popcount(current_mask),
+					stored_trackers
+				);
 				channel_change_pending = false;
-				tracker_channel_value = 0;  // Reset pending channel value
+				tracker_channel_value = 0; // Reset pending channel value
 			}
 		}
 
