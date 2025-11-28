@@ -35,19 +35,19 @@
 // Remote command flags for PONG data[7]
 #define ESB_PONG_FLAG_NORMAL 0x00
 #define ESB_PONG_FLAG_SHUTDOWN 0x01
-#define ESB_PONG_FLAG_CALIBRATE 0x02        // Trigger gyro/accel ZRO calibration
-#define ESB_PONG_FLAG_SIX_SIDE_CAL 0x03     // Trigger 6-point accelerometer calibration
-#define ESB_PONG_FLAG_MEOW 0x04             // Trigger meow output
-#define ESB_PONG_FLAG_SCAN 0x05             // Trigger sensor scan
-#define ESB_PONG_FLAG_MAG_CLEAR 0x06        // Clear magnetometer calibration
-#define ESB_PONG_FLAG_REBOOT 0x07           // Reboot tracker
-#define ESB_PONG_FLAG_CLEAR 0x08            // Clear pairing data
-#define ESB_PONG_FLAG_DFU 0x09              // Enter DFU bootloader
-#define ESB_PONG_FLAG_SET_CHANNEL 0x0A      // Set RF channel (data[8-11] contains channel value)
-#define ESB_PONG_FLAG_CLEAR_CHANNEL 0x0B    // Clear RF channel setting (restore default)
+#define ESB_PONG_FLAG_CALIBRATE 0x02     // Trigger gyro/accel ZRO calibration
+#define ESB_PONG_FLAG_SIX_SIDE_CAL 0x03  // Trigger 6-point accelerometer calibration
+#define ESB_PONG_FLAG_MEOW 0x04          // Trigger meow output
+#define ESB_PONG_FLAG_SCAN 0x05          // Trigger sensor scan
+#define ESB_PONG_FLAG_MAG_CLEAR 0x06     // Clear magnetometer calibration
+#define ESB_PONG_FLAG_REBOOT 0x07        // Reboot tracker
+#define ESB_PONG_FLAG_CLEAR 0x08         // Clear pairing data
+#define ESB_PONG_FLAG_DFU 0x09           // Enter DFU bootloader
+#define ESB_PONG_FLAG_SET_CHANNEL 0x0A   // Set RF channel (data[8-11] contains channel value)
+#define ESB_PONG_FLAG_CLEAR_CHANNEL 0x0B // Clear RF channel setting (restore default)
 // Reserved for future use: 0x0C-0xFF
 
-void event_handler(struct esb_evt const* event);
+void event_handler(struct esb_evt const *event);
 int clocks_start(void);
 int esb_initialize(bool);
 
@@ -71,20 +71,22 @@ void esb_receive(void);
 // Remote command API
 void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
 void esb_send_remote_command_all(uint8_t command_flag);
-void esb_set_all_trackers_channel(uint8_t channel);  // Set RF channel for all trackers
-void esb_clear_all_trackers_channel(void);  // Clear RF channel setting (restore default)
+void esb_set_all_trackers_channel(uint8_t channel); // Set RF channel for all trackers
+void esb_clear_all_trackers_channel(void);          // Clear RF channel setting (restore default)
 
 // Local receiver channel management
-void esb_set_receiver_channel(uint8_t channel);  // Set receiver RF channel only (local)
-void esb_clear_receiver_channel(void);  // Clear receiver RF channel (restore default, local)
-uint8_t esb_get_receiver_channel(void);  // Get current receiver RF channel (returns 0xFF if default)
+void esb_set_receiver_channel(uint8_t channel); // Set receiver RF channel only (local)
+void esb_clear_receiver_channel(void);          // Clear receiver RF channel (restore default, local)
+uint8_t esb_get_receiver_channel(void);         // Get current receiver RF channel (returns 0xFF if default)
 
 // Convenience wrappers for specific commands
-static inline void esb_request_tracker_shutdown(uint8_t tracker_id) {
+static inline void esb_request_tracker_shutdown(uint8_t tracker_id)
+{
 	esb_send_remote_command(tracker_id, ESB_PONG_FLAG_SHUTDOWN);
 }
 
-static inline void esb_request_all_shutdown(void) {
+static inline void esb_request_all_shutdown(void)
+{
 	esb_send_remote_command_all(ESB_PONG_FLAG_SHUTDOWN);
 }
 

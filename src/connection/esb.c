@@ -34,6 +34,12 @@
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 
+// TDMA parameters (copied from Tracker)
+#define TDMA_NUM_TRACKERS 10
+#define TDMA_PACKETS_PER_SECOND 160 // Target TPS per tracker
+#define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
+#define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
+
 static struct esb_payload rx_payload;
 // static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
 //														  0, 0, 0, 0, 0, 0, 0, 0);
@@ -104,6 +110,23 @@ static struct packet_stats tracker_stats[MAX_TRACKERS] = {0};
 #define STATS_PRINT_INTERVAL_MS 5000     // 每5秒打印一次统计
 #define TPS_CALCULATION_INTERVAL_MS 1000 // 每秒计算一次TPS
 #define TPS_MONITOR_INTERVAL_MS 500
+
+// TDMA Statistics
+struct tdma_stats {
+	int64_t sum_offset;
+	uint64_t sum_sq_offset;
+	int32_t min_offset;
+	int32_t max_offset;
+	uint32_t count;
+	uint32_t violations;
+	int64_t last_log_time;
+};
+
+static struct tdma_stats g_tdma_stats[MAX_TRACKERS] = {0};
+
+// Smoothed offset for feedback (EMA)
+static int32_t g_smoothed_offset[MAX_TRACKERS] = {0};
+static bool g_offset_initialized[MAX_TRACKERS] = {false};
 
 // 统计线程相关
 static void esb_stats_thread(void);
@@ -401,6 +424,9 @@ void event_handler(struct esb_evt const *event)
 		int err = 0;
 		while (!err) {
 			err = esb_read_rx_payload(&rx_payload);
+			// Capture arrival time using cycle counter to match PONG timestamp
+			// Note: This will wrap around when the 32-bit cycle counter wraps
+			uint64_t now_us = k_cyc_to_us_floor64(k_cycle_get_32());
 			if (err == -ENODATA) {
 				break;
 			} else if (err) {
@@ -449,6 +475,111 @@ void event_handler(struct esb_evt const *event)
 					rx_payload.data[1],
 					rx_payload.data[2]
 				);
+
+				// TDMA Slot Check for PING
+				uint8_t tracker_id = rx_payload.data[1];
+				int64_t center_offset = 0;
+
+				// Parse new PING fields (added in protocol update)
+				uint32_t expected_rx_cycles = ((uint32_t)rx_payload.data[8] << 24)
+											| ((uint32_t)rx_payload.data[9] << 16)
+											| ((uint32_t)rx_payload.data[10] << 8) | ((uint32_t)rx_payload.data[11]);
+
+				if (tracker_id < MAX_TRACKERS) {
+					uint64_t slot_offset = now_us % TDMA_PACKET_INTERVAL_US;
+					uint64_t expected_start = tracker_id * TDMA_SLOT_DURATION_US;
+					uint64_t expected_end = (tracker_id + 1) * TDMA_SLOT_DURATION_US;
+
+					// Calculate signed offset from the center of the expected slot
+					center_offset = (int64_t)slot_offset - (int64_t)(expected_start + TDMA_SLOT_DURATION_US / 2);
+
+					// Handle wrap-around (shortest path to center)
+					if (center_offset > (TDMA_PACKET_INTERVAL_US / 2)) {
+						center_offset -= TDMA_PACKET_INTERVAL_US;
+					} else if (center_offset < -(TDMA_PACKET_INTERVAL_US / 2)) {
+						center_offset += TDMA_PACKET_INTERVAL_US;
+					}
+
+					// Update smoothed offset (EMA)
+					// Alpha = 1/2 for faster TDMA alignment
+					if (!g_offset_initialized[tracker_id]) {
+						g_smoothed_offset[tracker_id] = (int32_t)center_offset;
+						g_offset_initialized[tracker_id] = true;
+					} else {
+						// EMA: new = (old + current) / 2
+						g_smoothed_offset[tracker_id] = (g_smoothed_offset[tracker_id] + (int32_t)center_offset) / 2;
+					}
+
+					// Update stats
+					struct tdma_stats *stats = &g_tdma_stats[tracker_id];
+					stats->count++;
+					stats->sum_offset += center_offset;
+					stats->sum_sq_offset += (center_offset * center_offset);
+					if (stats->count == 1) {
+						stats->min_offset = center_offset;
+						stats->max_offset = center_offset;
+					} else {
+						if (center_offset < stats->min_offset) {
+							stats->min_offset = center_offset;
+						}
+						if (center_offset > stats->max_offset) {
+							stats->max_offset = center_offset;
+						}
+					}
+
+					if (slot_offset < expected_start || slot_offset >= expected_end) {
+						stats->violations++;
+					}
+
+					// Diagnostic: Compare expected vs actual receiver time
+					uint32_t actual_rx_cycles = k_cycle_get_32();
+					int32_t rx_time_diff_cycles = (int32_t)(actual_rx_cycles - expected_rx_cycles);
+					int32_t rx_time_diff_us
+						= k_cyc_to_us_near32((uint32_t)(rx_time_diff_cycles < 0 ? -rx_time_diff_cycles
+																				: rx_time_diff_cycles));
+
+					// Log periodically
+					int64_t now_ms = k_uptime_get();
+					if (stats->count > 0) {
+						int64_t mean = stats->sum_offset / stats->count;
+						uint64_t variance = (stats->sum_sq_offset / stats->count) - (mean * mean);
+						uint32_t std_dev = 0;
+						if (variance > 0) {
+							uint64_t s = variance / 2;
+							if (s > 0) {
+								uint64_t x = s;
+								uint64_t y = (x + variance / x) / 2;
+								while (y < x) {
+									x = y;
+									y = (x + variance / x) / 2;
+								}
+								std_dev = (uint32_t)x;
+							} else {
+								std_dev = (uint32_t)variance;
+							}
+						}
+
+						LOG_DBG(
+							"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld us StdDev=%u us Range=[%d, %d] Smooth=%d "
+							"RxTimeDiff=%s%d us",
+							tracker_id,
+							stats->count,
+							stats->violations,
+							mean,
+							std_dev,
+							stats->min_offset,
+							stats->max_offset,
+							g_smoothed_offset[tracker_id],
+							rx_time_diff_cycles >= 0 ? "+" : "-",
+							rx_time_diff_us
+						);
+					}
+
+					// Reset stats
+					memset(stats, 0, sizeof(struct tdma_stats));
+					stats->last_log_time = now_ms;
+				}
+
 				// Check for PING control packet and respond with PONG
 				if (rx_payload.data[0] == ESB_PING_TYPE) {
 					uint8_t tracker_id = rx_payload.data[1];
@@ -533,20 +664,6 @@ void event_handler(struct esb_evt const *event)
 						bool is_large_gap = false;
 						bool is_tracker_restart = false;
 
-						// Detect out-of-order (backward jump) vs forward gap
-						// If diff > 128, it's likely a backward jump
-						// (out-of-order) BUT: if new counter is 0 or 1, it's
-						// likely a tracker restart Example: last=90, new=88 ->
-						// diff=254 (actually -2, out-of-order)
-						//          last=88, new=90 -> diff=2 (forward, normal
-						//          or small gap) last=220, new=5 -> diff=41
-						//          (forward, but wraps around at 256) last=14,
-						//          new=0 -> diff=242 (backward -14, but is
-						//          restart) last=17, new=0 -> diff=239
-						//          (backward -17, but is restart)
-
-						// 检测tracker重启：如果新counter是0或1，且不是正常递增（diff
-						// != 1） 这表明tracker重启了，counter从0重新开始
 						if ((counter == 0 || counter == 1) && counter_diff != 1) {
 							is_tracker_restart = true;
 							LOG_INF(
@@ -710,6 +827,15 @@ void event_handler(struct esb_evt const *event)
 						pong.data[10] = (rxt_cycles >> 8) & 0xFF;
 						pong.data[11] = (rxt_cycles) & 0xFF;
 					}
+					// Include timing offset in PONG payload (bytes 12-15)
+					// This allows the tracker to correct its clock phase
+					// Use the SMOOTHED offset for feedback
+					// int32_t feedback_offset = g_smoothed_offset[tracker_id];
+					// pong.data[12] = (feedback_offset >> 24) & 0xFF;
+					// pong.data[13] = (feedback_offset >> 16) & 0xFF;
+					// pong.data[14] = (feedback_offset >> 8) & 0xFF;
+					// pong.data[15] = (feedback_offset) & 0xFF;
+
 					// Try to write ACK payload with robust error handling
 					pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
 					esb_flush_tx();
@@ -802,8 +928,41 @@ void event_handler(struct esb_evt const *event)
 			} break;
 			case 17: // 16 bytes data + 1 byte sequence number
 			{
-				uint8_t imu_id = rx_payload.data[1];
-				if (imu_id >= stored_trackers) { // not a stored tracker
+				uint8_t tracker_id = rx_payload.data[1];
+
+				// TDMA Slot Check for Data (Type 17)
+				if (tracker_id < MAX_TRACKERS) {
+					uint64_t slot_offset = now_us % TDMA_PACKET_INTERVAL_US;
+					uint64_t expected_start = tracker_id * TDMA_SLOT_DURATION_US;
+					uint64_t expected_end = (tracker_id + 1) * TDMA_SLOT_DURATION_US;
+
+					// Calculate signed offset from the center of the expected slot
+					int64_t center_offset
+						= (int64_t)slot_offset - (int64_t)(expected_start + TDMA_SLOT_DURATION_US / 2);
+
+					// Update stats
+					struct tdma_stats *stats = &g_tdma_stats[tracker_id];
+					stats->count++;
+					stats->sum_offset += center_offset;
+					stats->sum_sq_offset += (center_offset * center_offset);
+					if (stats->count == 1) {
+						stats->min_offset = center_offset;
+						stats->max_offset = center_offset;
+					} else {
+						if (center_offset < stats->min_offset) {
+							stats->min_offset = center_offset;
+						}
+						if (center_offset > stats->max_offset) {
+							stats->max_offset = center_offset;
+						}
+					}
+
+					if (slot_offset < expected_start || slot_offset >= expected_end) {
+						stats->violations++;
+					}
+				}
+
+				if (tracker_id >= stored_trackers) { // not a stored tracker
 					continue;
 				}
 
@@ -812,16 +971,16 @@ void event_handler(struct esb_evt const *event)
 				}
 
 				uint8_t received_sequence = rx_payload.data[16];
-				int seq_result = check_packet_sequence(imu_id, received_sequence);
+				int seq_result = check_packet_sequence(tracker_id, received_sequence);
 
 				// 根据序号检查结果决定是否转发数据包
 				// seq_result: 0=正常, 1=可能丢包, 2=乱序, 3=重启, 4=重复
 				if (seq_result == 4) {
-					LOG_DBG("TRK %d: Duplicate packet seq=%d, dropped", imu_id, received_sequence);
+					LOG_DBG("TRK %d: Duplicate packet seq=%d, dropped", tracker_id, received_sequence);
 					break; // 丢弃重复包
 				}
 				if (seq_result == 2) {
-					LOG_DBG("TRK %d: Out-of-order packet seq=%d, dropped", imu_id, received_sequence);
+					LOG_DBG("TRK %d: Out-of-order packet seq=%d, dropped", tracker_id, received_sequence);
 					break; // 丢弃乱序包，避免姿态计算错误
 				}
 
@@ -829,9 +988,10 @@ void event_handler(struct esb_evt const *event)
 				hid_write_packet_n(rx_payload.data,
 								   rx_payload.rssi); // write to hid endpoint
 			} break;
-			case 16: // legacy format without sequence number
+			case 16: // legacy format without sequence number, no TDMA check, just for backward compatibility
 			{
 				uint8_t imu_id = rx_payload.data[1];
+
 				if (imu_id >= stored_trackers) { // not a stored tracker
 					continue;
 				}
