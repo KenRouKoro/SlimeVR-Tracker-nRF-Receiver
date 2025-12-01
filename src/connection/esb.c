@@ -422,9 +422,8 @@ void event_handler(struct esb_evt const *event)
 		int err = 0;
 		while (!err) {
 			err = esb_read_rx_payload(&rx_payload);
-			// Capture arrival time using cycle counter to match PONG timestamp
-			// Note: This will wrap around when the 32-bit cycle counter wraps
-			uint64_t now_us = k_cyc_to_us_floor64(k_cycle_get_32());
+			uint32_t current_rx_ticks = k_uptime_ticks();
+			uint64_t current_rx_us = k_ticks_to_us_floor64(current_rx_ticks);
 			if (err == -ENODATA) {
 				break;
 			} else if (err) {
@@ -479,12 +478,11 @@ void event_handler(struct esb_evt const *event)
 				int64_t center_offset = 0;
 
 				// Parse new PING fields (added in protocol update)
-				uint32_t expected_rx_cycles = ((uint32_t)rx_payload.data[8] << 24)
-											| ((uint32_t)rx_payload.data[9] << 16)
-											| ((uint32_t)rx_payload.data[10] << 8) | ((uint32_t)rx_payload.data[11]);
+				uint32_t expected_rx_ticks = ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
+										   | ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
 
 				if (tracker_id < MAX_TRACKERS) {
-					uint64_t slot_offset = now_us % TDMA_PACKET_INTERVAL_US;
+					uint64_t slot_offset = current_rx_us % TDMA_PACKET_INTERVAL_US;
 					uint64_t expected_start = tracker_id * TDMA_SLOT_DURATION_US;
 					uint64_t expected_end = (tracker_id + 1) * TDMA_SLOT_DURATION_US;
 
@@ -530,11 +528,9 @@ void event_handler(struct esb_evt const *event)
 					}
 
 					// Diagnostic: Compare expected vs actual receiver time
-					uint32_t actual_rx_cycles = k_cycle_get_32();
-					int32_t rx_time_diff_cycles = (int32_t)(actual_rx_cycles - expected_rx_cycles);
-					int32_t rx_time_diff_us
-						= k_cyc_to_us_near32((uint32_t)(rx_time_diff_cycles < 0 ? -rx_time_diff_cycles
-																				: rx_time_diff_cycles));
+					int32_t rx_time_diff_ticks = (int32_t)(current_rx_ticks - expected_rx_ticks);
+					uint64_t rx_time_diff_us
+						= k_ticks_to_us_floor64((rx_time_diff_ticks < 0 ? -rx_time_diff_ticks : rx_time_diff_ticks));
 
 					// Log periodically
 					int64_t now_ms = k_uptime_get();
@@ -559,7 +555,7 @@ void event_handler(struct esb_evt const *event)
 
 						LOG_DBG(
 							"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld us StdDev=%u us Range=[%d, %d] Smooth=%d "
-							"RxTimeDiff=%s%d us",
+							"RxTimeDiff=%s%llu us",
 							tracker_id,
 							stats->count,
 							stats->violations,
@@ -568,7 +564,7 @@ void event_handler(struct esb_evt const *event)
 							stats->min_offset,
 							stats->max_offset,
 							g_smoothed_offset[tracker_id],
-							rx_time_diff_cycles >= 0 ? "+" : "-",
+							rx_time_diff_ticks >= 0 ? "+" : "-",
 							rx_time_diff_us
 						);
 					}
@@ -582,8 +578,7 @@ void event_handler(struct esb_evt const *event)
 				if (rx_payload.data[0] == ESB_PING_TYPE) {
 					uint8_t tracker_id = rx_payload.data[1];
 					uint8_t counter = rx_payload.data[2];
-					uint32_t t_lo = ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
-								  | ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
+
 					uint8_t ping_ack_flag = rx_payload.data[7];
 
 					if (rx_payload.pipe != 1 + (tracker_id % 7)) {
@@ -638,6 +633,21 @@ void event_handler(struct esb_evt const *event)
 						}
 						break;
 					}
+
+					uint32_t tracker_estimated_server_ticks
+						= ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
+						| ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
+					// Calculate signed ticks difference
+					int32_t ticks_diff = (int32_t)current_rx_ticks - (int32_t)tracker_estimated_server_ticks;
+					// Get absolute value for conversion to microseconds
+					uint32_t ticks_diff_abs = (uint32_t)(ticks_diff < 0 ? -ticks_diff : ticks_diff);
+					LOG_INF(
+						"Tracker %u PING ctr=%u ticks_offset=%s%d us",
+						tracker_id,
+						counter,
+						ticks_diff >= 0 ? "+" : "-",          // Add sign to the log
+						k_ticks_to_us_floor32(ticks_diff_abs) // Convert absolute tick difference to microseconds
+					);
 
 					// First PING received for this tracker - accept directly, no sequence check
 					if (!ping_counter_initialized[tracker_id]) {
@@ -804,10 +814,10 @@ void event_handler(struct esb_evt const *event)
 					pong.data[0] = ESB_PONG_TYPE;
 					pong.data[1] = tracker_id;
 					pong.data[2] = counter;
-					pong.data[3] = (t_lo >> 24) & 0xFF;
-					pong.data[4] = (t_lo >> 16) & 0xFF;
-					pong.data[5] = (t_lo >> 8) & 0xFF;
-					pong.data[6] = (t_lo) & 0xFF;
+					pong.data[3] = (current_rx_ticks >> 24) & 0xFF;
+					pong.data[4] = (current_rx_ticks >> 16) & 0xFF;
+					pong.data[5] = (current_rx_ticks >> 8) & 0xFF;
+					pong.data[6] = (current_rx_ticks) & 0xFF;
 					pong.data[7] = tracker_remote_command[tracker_id];
 
 					// Fill data[8-11] based on command type
@@ -818,17 +828,12 @@ void event_handler(struct esb_evt const *event)
 						pong.data[10] = (tracker_channel_value >> 8) & 0xFF;
 						pong.data[11] = (tracker_channel_value) & 0xFF;
 					} else {
-						// For other commands, use receiver cycle timestamp
-						// (high precision)
-						uint32_t rxt_cycles = k_cycle_get_32();
-						pong.data[8] = (rxt_cycles >> 24) & 0xFF;
-						pong.data[9] = (rxt_cycles >> 16) & 0xFF;
-						pong.data[10] = (rxt_cycles >> 8) & 0xFF;
-						pong.data[11] = (rxt_cycles) & 0xFF;
+						// For other commands, currently unused
+						memset(&pong.data[8], 0x00, 4); // reserved
 					}
 
 					// Try to write ACK payload with robust error handling
-					pong.data[12] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
+					pong.data[ESB_PONG_LEN - 1] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
 					esb_flush_tx();
 					int werr = esb_write_payload(&pong);
 
@@ -852,7 +857,7 @@ void event_handler(struct esb_evt const *event)
 
 				// TDMA Slot Check for Data (Type 17)
 				if (tracker_id < MAX_TRACKERS) {
-					uint64_t slot_offset = now_us % TDMA_PACKET_INTERVAL_US;
+					uint64_t slot_offset = current_rx_us % TDMA_PACKET_INTERVAL_US;
 					uint64_t expected_start = tracker_id * TDMA_SLOT_DURATION_US;
 					uint64_t expected_end = (tracker_id + 1) * TDMA_SLOT_DURATION_US;
 
