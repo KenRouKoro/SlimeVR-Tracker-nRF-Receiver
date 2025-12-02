@@ -641,7 +641,7 @@ void event_handler(struct esb_evt const *event)
 					int32_t ticks_diff = (int32_t)current_rx_ticks - (int32_t)tracker_estimated_server_ticks;
 					// Get absolute value for conversion to microseconds
 					uint32_t ticks_diff_abs = (uint32_t)(ticks_diff < 0 ? -ticks_diff : ticks_diff);
-					LOG_INF(
+					LOG_DBG(
 						"Tracker %u PING ctr=%u ticks_offset=%s%d us",
 						tracker_id,
 						counter,
@@ -827,6 +827,12 @@ void event_handler(struct esb_evt const *event)
 						pong.data[9] = (tracker_channel_value >> 16) & 0xFF;
 						pong.data[10] = (tracker_channel_value >> 8) & 0xFF;
 						pong.data[11] = (tracker_channel_value) & 0xFF;
+					} else if (tracker_remote_command[tracker_id] == ESB_PONG_FLAG_NORMAL) {
+						// Send ticks_diff for clock skew compensation
+						pong.data[8] = (ticks_diff >> 24) & 0xFF;
+						pong.data[9] = (ticks_diff >> 16) & 0xFF;
+						pong.data[10] = (ticks_diff >> 8) & 0xFF;
+						pong.data[11] = (ticks_diff) & 0xFF;
 					} else {
 						// For other commands, currently unused
 						memset(&pong.data[8], 0x00, 4); // reserved
