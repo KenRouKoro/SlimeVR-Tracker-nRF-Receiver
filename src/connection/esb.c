@@ -91,7 +91,7 @@ static uint8_t pending_channel = 0;         // The channel value to switch to
 static atomic_t channel_ack_mask
 	= ATOMIC_INIT(0);                      // Bitmask to track which trackers have acknowledged the channel change
 static int64_t channel_change_timeout = 0; // Timestamp for channel change timeout
-#define CHANNEL_CHANGE_TIMEOUT_MS 15000    // Timeout duration for waiting for all trackers to acknowledge
+#define CHANNEL_CHANGE_TIMEOUT_MS 30000    // Timeout duration for waiting for all trackers to acknowledge
 
 // Packet statistics structure
 struct packet_stats {
