@@ -80,10 +80,13 @@ static uint64_t last_ping_time[MAX_TRACKERS] = {0}; // Track the last time a PIN
 static uint8_t last_pong_queued_counter[MAX_TRACKERS] = {0}; // Track the last PONG counter enqueued for each tracker
 static uint8_t packet_count[MAX_TRACKERS] = {0};             // Packet count received from each tracker
 static uint8_t tracker_remote_command[MAX_TRACKERS] = {ESB_PONG_FLAG_NORMAL}; // Tracker remote command flag
+static int64_t tracker_command_ack_time[MAX_TRACKERS]
+	= {0};                                 // Time when tracker first echoed command (for delayed clearing)
 static uint32_t tracker_channel_value = 0; // Channel value to be set (for SET_CHANNEL command)
 static uint8_t receiver_rf_channel = 0xFF; // Current RF channel of the receiver, 0xFF indicates using default value
 
-#define PING_TIMEOUT_MS 5000 // PING timeout threshold: 5 seconds
+#define PING_TIMEOUT_MS 5000             // PING timeout threshold: 5 seconds
+#define REMOTE_COMMAND_ACK_DELAY_MS 5500 // Delay before clearing command after first ack (5s + 500ms safety margin)
 
 // Channel change confirmation tracking
 static bool channel_change_pending = false; // Indicates if a channel change is pending
@@ -785,13 +788,15 @@ void event_handler(struct esb_evt const *event)
 
 					if (ping_ack_flag != ESB_PONG_FLAG_NORMAL) {
 						if (tracker_remote_command[tracker_id] == ping_ack_flag) {
-							tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
-							LOG_DBG(
-								"Tracker %u confirmed command 0x%02X, clearing "
-								"flag",
+							// Tracker echoed our command - immediately clear to send NORMAL
+							// Tracker will start its delay countdown after receiving NORMAL
+							LOG_INF(
+								"Tracker %u acknowledged command 0x%02X, clearing to send NORMAL",
 								tracker_id,
 								ping_ack_flag
 							);
+							tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
+							tracker_command_ack_time[tracker_id] = 0;
 
 							if ((ping_ack_flag == ESB_PONG_FLAG_SET_CHANNEL
 								 || ping_ack_flag == ESB_PONG_FLAG_CLEAR_CHANNEL)
