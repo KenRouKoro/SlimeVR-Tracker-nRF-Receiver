@@ -80,7 +80,8 @@ static uint64_t last_ping_time[MAX_TRACKERS] = {0}; // Track the last time a PIN
 static uint8_t last_pong_queued_counter[MAX_TRACKERS] = {0}; // Track the last PONG counter enqueued for each tracker
 static uint8_t packet_count[MAX_TRACKERS] = {0};             // Packet count received from each tracker
 static uint8_t tracker_remote_command[MAX_TRACKERS] = {ESB_PONG_FLAG_NORMAL}; // Tracker remote command flag
-static uint32_t tracker_channel_value = 0; // Channel value to be set (for SET_CHANNEL command)
+static uint32_t tracker_channel_value = 0;               // Channel value to be set (for SET_CHANNEL command)
+static int16_t pending_sens_data[MAX_TRACKERS][3] = {0}; // Store pending sensitivity data
 static uint8_t receiver_rf_channel = 0xFF; // Current RF channel of the receiver, 0xFF indicates using default value
 
 #define PING_TIMEOUT_MS 5000 // PING timeout threshold: 5 seconds
@@ -827,6 +828,18 @@ void event_handler(struct esb_evt const *event)
 						pong.data[9] = (tracker_channel_value >> 16) & 0xFF;
 						pong.data[10] = (tracker_channel_value >> 8) & 0xFF;
 						pong.data[11] = (tracker_channel_value) & 0xFF;
+					} else if (tracker_remote_command[tracker_id] == ESB_PONG_FLAG_SENS_SET) {
+						// For SENS_SET, use compressed sensitivity data
+						// Overwrite time sync bytes (3-6) and use bytes 8-9
+						pong.data[3] = (pending_sens_data[tracker_id][0] >> 8) & 0xFF;
+						pong.data[4] = (pending_sens_data[tracker_id][0]) & 0xFF;
+						pong.data[5] = (pending_sens_data[tracker_id][1] >> 8) & 0xFF;
+						pong.data[6] = (pending_sens_data[tracker_id][1]) & 0xFF;
+
+						pong.data[8] = (pending_sens_data[tracker_id][2] >> 8) & 0xFF;
+						pong.data[9] = (pending_sens_data[tracker_id][2]) & 0xFF;
+						pong.data[10] = 0; // Unused
+						pong.data[11] = 0; // Unused
 					} else if (tracker_remote_command[tracker_id] == ESB_PONG_FLAG_NORMAL) {
 						// Send ticks_diff for clock skew compensation
 						pong.data[8] = (ticks_diff >> 24) & 0xFF;
@@ -1376,6 +1389,27 @@ void esb_reset_tracker_sequence(uint8_t tracker_id)
 		// Reset RSSI smoothing state
 		hid_reset_rssi_smooth(tracker_id);
 		LOG_INF("Packet sequence state and statistics reset for tracker %d", tracker_id);
+	}
+}
+
+void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z)
+{
+	if (tracker_id >= MAX_TRACKERS) {
+		return;
+	}
+	pending_sens_data[tracker_id][0] = (int16_t)(x * 100.0f);
+	pending_sens_data[tracker_id][1] = (int16_t)(y * 100.0f);
+	pending_sens_data[tracker_id][2] = (int16_t)(z * 100.0f);
+	tracker_remote_command[tracker_id] = ESB_PONG_FLAG_SENS_SET;
+	LOG_INF("Queued SENS_SET for tracker %u: %.2f, %.2f, %.2f", tracker_id, (double)x, (double)y, (double)z);
+}
+
+void esb_send_remote_command_channel(uint8_t tracker_id, uint8_t channel)
+{
+	if (tracker_id < MAX_TRACKERS) {
+		tracker_remote_command[tracker_id] = ESB_PONG_FLAG_SET_CHANNEL;
+		tracker_channel_value = channel;
+		LOG_INF("Queued SET_CHANNEL %u for tracker %u", channel, tracker_id);
 	}
 }
 

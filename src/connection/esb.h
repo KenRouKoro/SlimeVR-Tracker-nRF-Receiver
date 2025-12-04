@@ -46,6 +46,12 @@
 #define ESB_PONG_FLAG_SET_CHANNEL 0x0A   // Set RF channel (data[8-11] contains channel value)
 #define ESB_PONG_FLAG_CLEAR_CHANNEL 0x0B // Clear RF channel setting (restore default)
 // Reserved for future use: 0x0C-0xFF
+#define ESB_PONG_FLAG_SENS_SET 0x0C
+#define ESB_PONG_FLAG_SENS_RESET 0x0D
+#define ESB_PONG_FLAG_RESET_ZRO 0x0E
+#define ESB_PONG_FLAG_RESET_ACC 0x0F
+#define ESB_PONG_FLAG_RESET_BAT 0x10
+#define ESB_PONG_FLAG_PING 0x11
 
 void event_handler(struct esb_evt const *event);
 int clocks_start(void);
@@ -71,6 +77,7 @@ void esb_receive(void);
 // Remote command API
 void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
 void esb_send_remote_command_all(uint8_t command_flag);
+void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z);
 void esb_set_all_trackers_channel(uint8_t channel); // Set RF channel for all trackers
 void esb_clear_all_trackers_channel(void);          // Clear RF channel setting (restore default)
 

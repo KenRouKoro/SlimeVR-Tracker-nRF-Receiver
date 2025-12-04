@@ -41,7 +41,7 @@
 #define DFU_DBL_RESET_MEM 0x20007F7C
 #define DFU_DBL_RESET_APP 0x4ee5677e
 
-uint32_t* dbl_reset_mem = ((uint32_t*) DFU_DBL_RESET_MEM);
+uint32_t *dbl_reset_mem = ((uint32_t *)DFU_DBL_RESET_MEM);
 
 LOG_MODULE_REGISTER(console, LOG_LEVEL_INF);
 
@@ -57,56 +57,18 @@ static const struct device *gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 #endif
 
 static const char *meows[] = {
-	"Mew",
-	"Meww",
-	"Meow",
-	"Meow meow",
-	"Mrrrp",
-	"Mrrf",
-	"Mreow",
-	"Mrrrow",
-	"Mrrr",
-	"Purr",
-	"mew",
-	"meww",
-	"meow",
-	"meow meow",
-	"mrrrp",
-	"mrrf",
-	"mreow",
-	"mrrrow",
-	"mrrr",
-	"purr",
+	"Mew", "Meww", "Meow", "Meow meow", "Mrrrp", "Mrrf", "Mreow", "Mrrrow", "Mrrr", "Purr",
+	"mew", "meww", "meow", "meow meow", "mrrrp", "mrrf", "mreow", "mrrrow", "mrrr", "purr",
 };
 
-static const char *meow_punctuations[] = {
-	".",
-	"?",
-	"!",
-	"-",
-	"~",
-	""
-};
+static const char *meow_punctuations[] = {".", "?", "!", "-", "~", ""};
 
-static const char *meow_suffixes[] = {
-	" :3",
-	" :3c",
-	" ;3",
-	" ;3c",
-	" x3",
-	" x3c",
-	" X3",
-	" X3c",
-	" >:3",
-	" >:3c",
-	" >;3",
-	" >;3c",
-	""
-};
+static const char *meow_suffixes[]
+	= {" :3", " :3c", " ;3", " ;3c", " x3", " x3c", " X3", " X3c", " >:3", " >:3c", " >;3", " >;3c", ""};
 
 static void skip_dfu(void)
 {
-#if DFU_EXISTS // Using Adafruit bootloader
+#if DFU_EXISTS                            // Using Adafruit bootloader
 	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
 	ram_range_retain(dbl_reset_mem, sizeof(dbl_reset_mem), true);
 #endif
@@ -165,66 +127,91 @@ static void print_meow(void)
 
 static void print_help(void)
 {
-	printk("\n=== Available Commands ===\n\n"
-	       "Device Information:\n"
-	       "  info                       Get device information\n"
-	       "  uptime                     Get device uptime\n"
-	       "  list                       Get paired devices\n"
-	       "\n");
+	printk(
+		"\n=== Available Commands ===\n\n"
+		"Device Information:\n"
+		"  info                       Get device information\n"
+		"  uptime                     Get device uptime\n"
+		"  list                       Get paired devices\n"
+		"\n"
+	);
 
-	printk("Device Management:\n"
-	       "  reboot                     Soft reset the device\n"
-	       "  add <address>              Manually add a device\n"
-	       "  remove                     Remove last device\n"
-	       "  pair                       Enter pairing mode\n"
-	       "  exit                       Exit pairing mode\n"
-	       "  clear                      Clear stored devices\n"
-	       "\n");
+	printk(
+		"Device Management:\n"
+		"  reboot                     Soft reset the device\n"
+		"  add <address>              Manually add a device\n"
+		"  remove                     Remove last device\n"
+		"  pair                       Enter pairing mode\n"
+		"  exit                       Exit pairing mode\n"
+		"  clear                      Clear stored devices\n"
+		"\n"
+	);
 
-	printk("Statistics:\n"
-	       "  stats                      Show packet statistics\n"
-	       "  resetstats                 Reset packet statistics\n"
-	       "\n");
+	printk(
+		"Statistics:\n"
+		"  stats                      Show packet statistics\n"
+		"  resetstats                 Reset packet statistics\n"
+		"\n"
+	);
 
-	printk("RF Channel (Local Receiver):\n"
-	       "  channel <0-100>            Set receiver RF channel only\n"
-	       "    Example: channel 25       Set receiver to channel 25\n"
-	       "  clearchannel               Clear receiver RF channel (use default)\n"
-	       "\n");
+	printk(
+		"RF Channel (Local Receiver):\n"
+		"  channel <0-100>            Set receiver RF channel only\n"
+		"    Example: channel 25       Set receiver to channel 25\n"
+		"  clearchannel               Clear receiver RF channel (use default)\n"
+		"\n"
+	);
 
-	printk("Remote Commands:\n"
-	       "  send <id|all> <command>    Send remote command to tracker(s)\n"
-	       "    Commands: shutdown, calibrate, 6-side, meow, scan, mag,\n"
-	       "              reboot, clear, dfu, channel <0-100>, clearchannel\n");
+	printk(
+		"Remote Commands:\n"
+		"  send <id|all> <command>    Send remote command to tracker(s)\n"
+		"    Commands: shutdown, calibrate, 6-side, meow, scan, mag,\n"
+		"              reboot, clear, dfu, channel <0-100>, clearchannel,\n"
+		"              sens <x,y,z|reset>, reset <zro|acc|bat>, ping\n"
+	);
 
-	printk("    Examples:\n"
-	       "      send 0 shutdown          Shutdown tracker 0\n"
-	       "      send all calibrate       Calibrate all trackers\n"
-	       "      send 1 meow              Make tracker 1 meow\n"
-	       "      send 2 reboot            Reboot tracker 2\n");
+	printk(
+		"    Examples:\n"
+		"      send 0 shutdown          Shutdown tracker 0\n"
+		"      send all calibrate       Calibrate all trackers\n"
+		"      send 1 meow              Make tracker 1 meow\n"
+		"      send 2 reboot            Reboot tracker 2\n"
+		"      send 0 sens 1.0,1.0,1.0  Set sensitivity for tracker 0\n"
+		"      send all sens reset      Reset sensitivity for all\n"
+		"      send 1 reset zro         Reset ZRO calibration on tracker 1\n"
+		"      send all ping            Ping all trackers\n"
+	);
 
-	printk("      send 3 clear             Clear pairing on tracker 3\n"
-	       "      send all dfu             Enter DFU mode on all trackers\n"
-	       "      send all channel 25      Set all trackers to channel 25\n"
-	       "      send all clearchannel    Clear channel for all trackers\n"
-	       "\n");
+	printk(
+		"      send 3 clear             Clear pairing on tracker 3\n"
+		"      send all dfu             Enter DFU mode on all trackers\n"
+		"      send all channel 25      Set all trackers to channel 25\n"
+		"      send all clearchannel    Clear channel for all trackers\n"
+		"\n"
+	);
 
 #if DFU_EXISTS
-	printk("Bootloader:\n"
-	       "  dfu                        Enter DFU bootloader\n"
-	       "\n");
+	printk(
+		"Bootloader:\n"
+		"  dfu                        Enter DFU bootloader\n"
+		"\n"
+	);
 #endif
 
-	printk("Other:\n"
-	       "  meow                       Meow!\n"
-	       "  help                       Show this help message\n"
-	       "\n");
+	printk(
+		"Other:\n"
+		"  meow                       Meow!\n"
+		"  help                       Show this help message\n"
+		"\n"
+	);
 
-	printk("Button Functions:\n"
-	       "  Short press (1x):          Status check\n"
-	       "  Quick press (2x):          Exit pairing mode\n"
-	       "  Quick press (3x):          Enter pairing mode\n"
-	       "  Long press (5s):           Clear all pairings\n");
+	printk(
+		"Button Functions:\n"
+		"  Short press (1x):          Status check\n"
+		"  Quick press (2x):          Exit pairing mode\n"
+		"  Quick press (3x):          Enter pairing mode\n"
+		"  Long press (5s):           Clear all pairings\n"
+	);
 
 #if DFU_EXISTS
 	printk("  Long press (10s):          Enter DFU mode\n");
@@ -235,8 +222,9 @@ static void print_help(void)
 static void print_list(void)
 {
 	printk("Stored devices:\n");
-	for (uint8_t i = 0; i < stored_trackers; i++)
+	for (uint8_t i = 0; i < stored_trackers; i++) {
 		printk("%012llX\n", stored_tracker_addr[i]);
+	}
 }
 
 static void console_thread(void)
@@ -245,14 +233,14 @@ static void console_thread(void)
 	if (button_read()) // button held on usb connect, enter DFU
 	{
 #if ADAFRUIT_BOOTLOADER
-			NRF_POWER->GPREGRET = 0x57;
-			k_msleep(100); // Wait for register to be written
-			sys_reboot(SYS_REBOOT_COLD);
+		NRF_POWER->GPREGRET = 0x57;
+		k_msleep(100); // Wait for register to be written
+		sys_reboot(SYS_REBOOT_COLD);
 #endif
 #if NRF5_BOOTLOADER
-			gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
-			k_msleep(100); // Wait for GPIO to be configured
-			sys_reboot(SYS_REBOOT_COLD);
+		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
+		k_msleep(100); // Wait for GPIO to be configured
+		sys_reboot(SYS_REBOOT_COLD);
 #endif
 	}
 #endif
@@ -260,8 +248,9 @@ static void console_thread(void)
 	console_getline_init();
 
 	// Wait for any pending log data to be processed
-	while (log_data_pending())
+	while (log_data_pending()) {
 		k_usleep(1);
+	}
 
 	// Wait for USB CDC to be ready by checking DTR (Data Terminal Ready) signal
 	// This ensures the terminal is actually connected and ready to receive data
@@ -322,27 +311,39 @@ static void console_thread(void)
 
 		// Split by spaces
 		p = line;
-		while (*p && *p != ' ') p++;
+		while (*p && *p != ' ') {
+			p++;
+		}
 		if (*p == ' ') {
 			*p = 0;
 			p++;
-			while (*p == ' ') p++;  // Skip multiple spaces
+			while (*p == ' ') {
+				p++; // Skip multiple spaces
+			}
 			if (*p) {
 				arg = p;
 				// Find second argument
-				while (*p && *p != ' ') p++;
+				while (*p && *p != ' ') {
+					p++;
+				}
 				if (*p == ' ') {
 					*p = 0;
 					p++;
-					while (*p == ' ') p++;
+					while (*p == ' ') {
+						p++;
+					}
 					if (*p) {
 						arg2 = p;
 						// Find third argument
-						while (*p && *p != ' ') p++;
+						while (*p && *p != ' ') {
+							p++;
+						}
 						if (*p == ' ') {
 							*p = 0;
 							p++;
-							while (*p == ' ') p++;
+							while (*p == ' ') {
+								p++;
+							}
 							if (*p) {
 								arg3 = p;
 							}
@@ -352,113 +353,67 @@ static void console_thread(void)
 			}
 		}
 
-		if (memcmp(line, command_help, sizeof(command_help)) == 0)
-		{
+		if (memcmp(line, command_help, sizeof(command_help)) == 0) {
 			print_help();
-		}
-		else if (memcmp(line, command_info, sizeof(command_info)) == 0)
-		{
+		} else if (memcmp(line, command_info, sizeof(command_info)) == 0) {
 			print_info();
-		}
-		else if (memcmp(line, command_uptime, sizeof(command_uptime)) == 0)
-		{
+		} else if (memcmp(line, command_uptime, sizeof(command_uptime)) == 0) {
 			print_uptime();
-		}
-		else if (memcmp(line, command_add, sizeof(command_add)) == 0)
-		{
+		} else if (memcmp(line, command_add, sizeof(command_add)) == 0) {
 			uint64_t addr = strtoull(arg, NULL, 16);
 			uint8_t buf[13];
 			snprintk(buf, 13, "%012llx", addr);
-			if (addr != 0 && memcmp(buf, arg, 13) == 0)
-			{
+			if (addr != 0 && memcmp(buf, arg, 13) == 0) {
 				int slot = esb_add_pair(addr, true);
-				if (slot >= 0)
-				{
+				if (slot >= 0) {
 					printk("Tracker stored in slot %d\n", slot);
-				}
-				else if (slot == -ENOSPC)
-				{
+				} else if (slot == -ENOSPC) {
 					printk("Tracker list is full\n");
-				}
-				else if (slot == -EINVAL)
-				{
+				} else if (slot == -EINVAL) {
 					printk("Invalid tracker address\n");
-				}
-				else
-				{
+				} else {
 					printk("Failed to add tracker: %d\n", slot);
 				}
-			}
-			else
-			{
+			} else {
 				printk("Invalid address\n");
 			}
-		}
-		else if (memcmp(line, command_remove, sizeof(command_remove)) == 0)
-		{
+		} else if (memcmp(line, command_remove, sizeof(command_remove)) == 0) {
 			esb_pop_pair();
-		}
-		else if (memcmp(line, command_list, sizeof(command_list)) == 0)
-		{
+		} else if (memcmp(line, command_list, sizeof(command_list)) == 0) {
 			print_list();
-		}
-		else if (memcmp(line, command_reboot, sizeof(command_reboot)) == 0)
-		{
+		} else if (memcmp(line, command_reboot, sizeof(command_reboot)) == 0) {
 			skip_dfu();
 			sys_reboot(SYS_REBOOT_COLD);
-		}
-		else if (memcmp(line, command_pair, sizeof(command_pair)) == 0)
-		{
+		} else if (memcmp(line, command_pair, sizeof(command_pair)) == 0) {
 			esb_reset_pair();
-		}
-		else if (memcmp(line, command_exit, sizeof(command_exit)) == 0)
-		{
+		} else if (memcmp(line, command_exit, sizeof(command_exit)) == 0) {
 			esb_finish_pair();
-		}
-		else if (memcmp(line, command_clear, sizeof(command_clear)) == 0)
-		{
+		} else if (memcmp(line, command_clear, sizeof(command_clear)) == 0) {
 			esb_clear();
-		}
-		else if (memcmp(line, command_stats, sizeof(command_stats)) == 0)
-		{
+		} else if (memcmp(line, command_stats, sizeof(command_stats)) == 0) {
 			esb_print_all_stats();
-		}
-		else if (memcmp(line, command_resetstats, sizeof(command_resetstats)) == 0)
-		{
+		} else if (memcmp(line, command_resetstats, sizeof(command_resetstats)) == 0) {
 			esb_reset_all_stats();
-		}
-		else if (memcmp(line, command_channel, sizeof(command_channel)) == 0)
-		{
-			if (!arg)
-			{
+		} else if (memcmp(line, command_channel, sizeof(command_channel)) == 0) {
+			if (!arg) {
 				printk("Usage: channel <0-100>\n");
 				printk("Example: channel 25 - Set receiver RF channel to 25 (local only)\n");
-			}
-			else
-			{
+			} else {
 				char *endptr;
 				long channel = strtol(arg, &endptr, 10);
 
-				if (*endptr != '\0' || channel < 0 || channel > 100)
-				{
+				if (*endptr != '\0' || channel < 0 || channel > 100) {
 					printk("Invalid channel. Must be a number between 0 and 100.\n");
-				}
-				else
-				{
+				} else {
 					esb_set_receiver_channel((uint8_t)channel);
 					printk("Receiver RF channel set to %d (local only)\n", (int)channel);
 				}
 			}
-		}
-		else if (memcmp(line, command_clearchannel, sizeof(command_clearchannel)) == 0)
-		{
+		} else if (memcmp(line, command_clearchannel, sizeof(command_clearchannel)) == 0) {
 			esb_clear_receiver_channel();
 			printk("Receiver RF channel cleared (local only)\n");
-		}
-		else if (memcmp(line, command_send, sizeof(command_send)) == 0)
-		{
-			if (!arg || !arg2)
-			{
+		} else if (memcmp(line, command_send, sizeof(command_send)) == 0) {
+			if (!arg || !arg2) {
 				printk("Usage: send <id|all> <command>\n");
 				printk("Examples:\n");
 				printk("  send 0 shutdown      - Shutdown tracker 0\n");
@@ -468,22 +423,21 @@ static void console_thread(void)
 				printk("  send 2 reboot        - Reboot tracker 2\n");
 				printk("  send 3 clear         - Clear pairing on tracker 3\n");
 				printk("  send all dfu         - Enter DFU mode on all trackers\n");
-				printk("Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu\n");
-			}
-			else
-			{
+				printk(
+					"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
+					"reset, ping\n"
+				);
+			} else {
 				// Parse target (id or "all")
 				bool target_all = (strcmp(arg, "all") == 0);
 				uint8_t tracker_id = 0;
 
-				if (!target_all)
-				{
+				if (!target_all) {
 					// Parse tracker ID
 					char *endptr;
 					long id = strtol(arg, &endptr, 10);
 
-					if (*endptr != '\0' || id < 0 || id > 255)
-					{
+					if (*endptr != '\0' || id < 0 || id > 255) {
 						printk("Invalid tracker ID. Use a number (0-255) or 'all'\n");
 						continue;
 					}
@@ -497,43 +451,33 @@ static void console_thread(void)
 				if (strcmp(arg2, "shutdown") == 0) {
 					cmd_flag = ESB_PONG_FLAG_SHUTDOWN;
 					cmd_name = "Shutdown";
-				}
-				else if (strcmp(arg2, "calibrate") == 0) {
+				} else if (strcmp(arg2, "calibrate") == 0) {
 					cmd_flag = ESB_PONG_FLAG_CALIBRATE;
 					cmd_name = "Calibrate";
-				}
-				else if (strcmp(arg2, "6-side") == 0) {
+				} else if (strcmp(arg2, "6-side") == 0) {
 					cmd_flag = ESB_PONG_FLAG_SIX_SIDE_CAL;
 					cmd_name = "6-side calibration";
-				}
-				else if (strcmp(arg2, "meow") == 0) {
+				} else if (strcmp(arg2, "meow") == 0) {
 					cmd_flag = ESB_PONG_FLAG_MEOW;
 					cmd_name = "Meow";
-				}
-				else if (strcmp(arg2, "scan") == 0) {
+				} else if (strcmp(arg2, "scan") == 0) {
 					cmd_flag = ESB_PONG_FLAG_SCAN;
 					cmd_name = "Sensor scan";
-				}
-				else if (strcmp(arg2, "mag") == 0) {
+				} else if (strcmp(arg2, "mag") == 0) {
 					cmd_flag = ESB_PONG_FLAG_MAG_CLEAR;
 					cmd_name = "Magnetometer clear";
-				}
-				else if (strcmp(arg2, "reboot") == 0) {
+				} else if (strcmp(arg2, "reboot") == 0) {
 					cmd_flag = ESB_PONG_FLAG_REBOOT;
 					cmd_name = "Reboot";
-				}
-				else if (strcmp(arg2, "clear") == 0) {
+				} else if (strcmp(arg2, "clear") == 0) {
 					cmd_flag = ESB_PONG_FLAG_CLEAR;
 					cmd_name = "Clear pairing";
-				}
-				else if (strcmp(arg2, "dfu") == 0) {
+				} else if (strcmp(arg2, "dfu") == 0) {
 					cmd_flag = ESB_PONG_FLAG_DFU;
 					cmd_name = "DFU mode";
-				}
-				else if (strcmp(arg2, "channel") == 0) {
+				} else if (strcmp(arg2, "channel") == 0) {
 					// Special handling for channel command - needs arg3
-					if (!arg3)
-					{
+					if (!arg3) {
 						printk("Usage: send all channel <0-100>\n");
 						printk("Example: send all channel 25 - Set all trackers to channel 25\n");
 						continue;
@@ -542,14 +486,12 @@ static void console_thread(void)
 					char *endptr;
 					long channel = strtol(arg3, &endptr, 10);
 
-					if (*endptr != '\0' || channel < 0 || channel > 100)
-					{
+					if (*endptr != '\0' || channel < 0 || channel > 100) {
 						printk("Invalid channel. Must be a number between 0 and 100.\n");
 						continue;
 					}
 
-					if (!target_all)
-					{
+					if (!target_all) {
 						printk("Channel command only supports 'all' target\n");
 						continue;
 					}
@@ -557,10 +499,8 @@ static void console_thread(void)
 					esb_set_all_trackers_channel((uint8_t)channel);
 					printk("Setting RF channel to %d for all trackers and receiver\n", (int)channel);
 					continue;
-				}
-				else if (strcmp(arg2, "clearchannel") == 0) {
-					if (!target_all)
-					{
+				} else if (strcmp(arg2, "clearchannel") == 0) {
+					if (!target_all) {
 						printk("Clearchannel command only supports 'all' target\n");
 						continue;
 					}
@@ -568,31 +508,135 @@ static void console_thread(void)
 					esb_clear_all_trackers_channel();
 					printk("Clearing RF channel for all trackers and receiver\n");
 					continue;
+				} else if (strcmp(arg2, "sens") == 0) {
+					// sens command - needs arg3 for values or "reset"
+					if (!arg3) {
+						printk("Usage: send <id|all> sens <x>,<y>,<z> or send <id|all> sens reset\n");
+						printk("Example: send 0 sens 1.0,1.0,1.0\n");
+						printk("Example: send all sens reset\n");
+						continue;
+					}
+
+					if (strcmp(arg3, "reset") == 0) {
+						// sens reset command
+						if (target_all) {
+							esb_send_remote_command_all(ESB_PONG_FLAG_SENS_RESET);
+							printk("Sens reset request sent to all trackers\n");
+						} else {
+							esb_send_remote_command(tracker_id, ESB_PONG_FLAG_SENS_RESET);
+							printk("Sens reset request sent to tracker %d\n", tracker_id);
+						}
+					} else {
+						// Parse comma-separated floats
+						char *token;
+						char *endptr;
+						int token_count = 0;
+						float values[3];
+
+						token = strtok(arg3, ",");
+						while (token != NULL && token_count < 3) {
+							values[token_count] = strtof(token, &endptr);
+							if (token == endptr || *endptr != '\0') {
+								printk("Invalid float value: %s\n", token);
+								break;
+							}
+							token_count++;
+							token = strtok(NULL, ",");
+						}
+
+						if (token_count == 3) {
+							if (target_all) {
+								for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+									esb_send_remote_command_sens(i, values[0], values[1], values[2]);
+								}
+								printk(
+									"Sens set (%.2f,%.2f,%.2f) request sent to all trackers\n",
+									(double)values[0],
+									(double)values[1],
+									(double)values[2]
+								);
+							} else {
+								esb_send_remote_command_sens(tracker_id, values[0], values[1], values[2]);
+								printk(
+									"Sens set (%.2f,%.2f,%.2f) request sent to tracker %d\n",
+									(double)values[0],
+									(double)values[1],
+									(double)values[2],
+									tracker_id
+								);
+							}
+						} else {
+							printk("Error: Invalid format. Use: sens <x>,<y>,<z> or sens reset\n");
+							printk("Example: sens 10.5,-2.1,15.0\n");
+						}
+					}
+					continue;
+				} else if (strcmp(arg2, "reset") == 0) {
+					// reset command - needs arg3 for subcommand
+					if (!arg3) {
+						printk("Usage: send <id|all> reset <zro|acc|bat>\n");
+						printk("Example: send 0 reset zro\n");
+						printk("Example: send all reset acc\n");
+						continue;
+					}
+
+					uint8_t reset_cmd = 0xFF;
+					const char *reset_name = NULL;
+
+					if (strcmp(arg3, "zro") == 0) {
+						reset_cmd = ESB_PONG_FLAG_RESET_ZRO;
+						reset_name = "ZRO reset";
+					} else if (strcmp(arg3, "acc") == 0) {
+						reset_cmd = ESB_PONG_FLAG_RESET_ACC;
+						reset_name = "Accelerometer reset";
+					} else if (strcmp(arg3, "bat") == 0) {
+						reset_cmd = ESB_PONG_FLAG_RESET_BAT;
+						reset_name = "Battery reset";
+					} else {
+						printk("Unknown reset command: %s\n", arg3);
+						printk("Available: zro, acc, bat\n");
+						continue;
+					}
+
+					if (target_all) {
+						esb_send_remote_command_all(reset_cmd);
+						printk("%s request sent to all trackers\n", reset_name);
+					} else {
+						esb_send_remote_command(tracker_id, reset_cmd);
+						printk("%s request sent to tracker %d\n", reset_name, tracker_id);
+					}
+					continue;
+				} else if (strcmp(arg2, "ping") == 0) {
+					// ping command
+					if (target_all) {
+						esb_send_remote_command_all(ESB_PONG_FLAG_PING);
+						printk("Ping request sent to all trackers\n");
+					} else {
+						esb_send_remote_command(tracker_id, ESB_PONG_FLAG_PING);
+						printk("Ping request sent to tracker %d\n", tracker_id);
+					}
+					continue;
 				}
 
-				if (cmd_flag != 0xFF)
-				{
-					if (target_all)
-					{
+				if (cmd_flag != 0xFF) {
+					if (target_all) {
 						esb_send_remote_command_all(cmd_flag);
 						printk("%s request sent to all trackers\n", cmd_name);
-					}
-					else
-					{
+					} else {
 						esb_send_remote_command(tracker_id, cmd_flag);
 						printk("%s request sent to tracker %d\n", cmd_name, tracker_id);
 					}
-				}
-				else
-				{
+				} else {
 					printk("Unknown command: %s\n", arg2);
-					printk("Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu\n");
+					printk(
+						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
+						"reset, ping\n"
+					);
 				}
 			}
 		}
 #if DFU_EXISTS
-		else if (memcmp(line, command_dfu, sizeof(command_dfu)) == 0)
-		{
+		else if (memcmp(line, command_dfu, sizeof(command_dfu)) == 0) {
 #if ADAFRUIT_BOOTLOADER
 			NRF_POWER->GPREGRET = 0x57;
 			k_msleep(100); // Wait for register to be written
@@ -605,12 +649,9 @@ static void console_thread(void)
 #endif
 		}
 #endif
-		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0)
-		{
+		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) {
 			print_meow();
-		}
-		else
-		{
+		} else {
 			printk("Unknown command\n");
 		}
 	}
