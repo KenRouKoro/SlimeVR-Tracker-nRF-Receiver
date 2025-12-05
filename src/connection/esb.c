@@ -130,10 +130,6 @@ struct tdma_stats {
 
 static struct tdma_stats g_tdma_stats[MAX_TRACKERS] = {0};
 
-// Smoothed offset for feedback (EMA)
-static int32_t g_smoothed_offset[MAX_TRACKERS] = {0};
-static bool g_offset_initialized[MAX_TRACKERS] = {false};
-
 static void esb_stats_thread(void);
 K_THREAD_DEFINE(esb_stats_thread_id, 512, esb_stats_thread, NULL, NULL, NULL, 8, 0, 0);
 
@@ -476,57 +472,14 @@ void event_handler(struct esb_evt const *event)
 
 				// TDMA Slot Check for PING
 				uint8_t tracker_id = rx_payload.data[1];
-				int64_t center_offset = 0;
 
 				// Parse new PING fields (added in protocol update)
 				uint32_t expected_rx_ticks = ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
 										   | ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
 
 				if (tracker_id < MAX_TRACKERS) {
-					uint64_t slot_offset = current_rx_us % TDMA_PACKET_INTERVAL_US;
-					uint64_t expected_start = tracker_id * TDMA_SLOT_DURATION_US;
-					uint64_t expected_end = (tracker_id + 1) * TDMA_SLOT_DURATION_US;
-
-					// Calculate signed offset from the center of the expected slot
-					center_offset = (int64_t)slot_offset - (int64_t)(expected_start + TDMA_SLOT_DURATION_US / 2);
-
-					// Handle wrap-around (shortest path to center)
-					if (center_offset > (TDMA_PACKET_INTERVAL_US / 2)) {
-						center_offset -= TDMA_PACKET_INTERVAL_US;
-					} else if (center_offset < -(TDMA_PACKET_INTERVAL_US / 2)) {
-						center_offset += TDMA_PACKET_INTERVAL_US;
-					}
-
-					// Update smoothed offset (EMA)
-					// Alpha = 1/2 for faster TDMA alignment
-					if (!g_offset_initialized[tracker_id]) {
-						g_smoothed_offset[tracker_id] = (int32_t)center_offset;
-						g_offset_initialized[tracker_id] = true;
-					} else {
-						// EMA: new = (old + current) / 2
-						g_smoothed_offset[tracker_id] = (g_smoothed_offset[tracker_id] + (int32_t)center_offset) / 2;
-					}
-
 					// Update stats
 					struct tdma_stats *stats = &g_tdma_stats[tracker_id];
-					stats->count++;
-					stats->sum_offset += center_offset;
-					stats->sum_sq_offset += (center_offset * center_offset);
-					if (stats->count == 1) {
-						stats->min_offset = center_offset;
-						stats->max_offset = center_offset;
-					} else {
-						if (center_offset < stats->min_offset) {
-							stats->min_offset = center_offset;
-						}
-						if (center_offset > stats->max_offset) {
-							stats->max_offset = center_offset;
-						}
-					}
-
-					if (slot_offset < expected_start || slot_offset >= expected_end) {
-						stats->violations++;
-					}
 
 					// Diagnostic: Compare expected vs actual receiver time
 					int32_t rx_time_diff_ticks = (int32_t)(current_rx_ticks - expected_rx_ticks);
@@ -555,7 +508,7 @@ void event_handler(struct esb_evt const *event)
 						}
 
 						LOG_DBG(
-							"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld us StdDev=%u us Range=[%d, %d] Smooth=%d "
+							"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld us StdDev=%u us Range=[%d, %d] "
 							"RxTimeDiff=%s%llu us",
 							tracker_id,
 							stats->count,
@@ -564,7 +517,6 @@ void event_handler(struct esb_evt const *event)
 							std_dev,
 							stats->min_offset,
 							stats->max_offset,
-							g_smoothed_offset[tracker_id],
 							rx_time_diff_ticks >= 0 ? "+" : "-",
 							rx_time_diff_us
 						);
