@@ -36,7 +36,7 @@
 
 // TDMA parameters (copied from Tracker)
 #define TDMA_NUM_TRACKERS 10
-#define TDMA_PACKETS_PER_SECOND 125 // Target TPS per tracker
+#define TDMA_PACKETS_PER_SECOND 111 // Target TPS per tracker
 #define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
 #define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
 
