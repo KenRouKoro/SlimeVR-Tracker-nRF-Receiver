@@ -35,6 +35,7 @@
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 
 // TDMA parameters (copied from Tracker)
+#define TDMA_ENABLED 0
 #define TDMA_NUM_TRACKERS 10
 #define TDMA_PACKETS_PER_SECOND 111 // Target TPS per tracker
 #define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
@@ -507,6 +508,7 @@ void event_handler(struct esb_evt const *event)
 							}
 						}
 
+#if TDMA_ENABLED
 						if (stats->violations > 3) {
 							LOG_WRN(
 								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld us StdDev=%u us Range=[%d, %d] "
@@ -536,6 +538,7 @@ void event_handler(struct esb_evt const *event)
 								rx_time_diff_us
 							);
 						}
+#endif
 					}
 
 					// Reset stats
