@@ -62,7 +62,7 @@
 			gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;
 			label = "Red LED 1";
 		};
-		led1_green: led_2 {
+		led2_green: led_2 {
 			gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
 			label = "Green LED 1";
 		};
