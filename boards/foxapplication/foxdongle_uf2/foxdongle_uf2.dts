@@ -123,6 +123,10 @@
 	status = "okay";
 };
 
+&gpio1 {
+	status = "okay";
+};
+
 &gpiote {
 	status = "okay";
 };
