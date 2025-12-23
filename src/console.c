@@ -167,7 +167,7 @@ static void print_help(void)
 		"  send <id|all> <command>    Send remote command to tracker(s)\n"
 		"    Commands: shutdown, calibrate, 6-side, meow, scan, mag,\n"
 		"              reboot, clear, dfu, channel <0-100>, clearchannel,\n"
-		"              sens <x,y,z|reset>, reset <zro|acc|bat>, ping\n"
+		"              sens <x,y,z|reset>, reset <zro|acc|bat|tcal>, ping\n"
 	);
 
 	printk(
@@ -301,6 +301,7 @@ static void console_thread(void)
 		uint8_t *arg = NULL;
 		uint8_t *arg2 = NULL;
 		uint8_t *arg3 = NULL;
+		uint8_t *arg4 = NULL;
 
 		// Parse command and arguments
 		uint8_t *p = line;
@@ -346,6 +347,20 @@ static void console_thread(void)
 							}
 							if (*p) {
 								arg3 = p;
+								// Find fourth argument
+								while (*p && *p != ' ') {
+									p++;
+								}
+								if (*p == ' ') {
+									*p = 0;
+									p++;
+									while (*p == ' ') {
+										p++;
+									}
+									if (*p) {
+										arg4 = p;
+									}
+								}
 							}
 						}
 					}
@@ -425,7 +440,7 @@ static void console_thread(void)
 				printk("  send all dfu         - Enter DFU mode on all trackers\n");
 				printk(
 					"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
-					"reset, ping\n"
+					"reset, ping, tcal\n"
 				);
 			} else {
 				// Parse target (id or "all")
@@ -574,7 +589,7 @@ static void console_thread(void)
 				} else if (strcmp(arg2, "reset") == 0) {
 					// reset command - needs arg3 for subcommand
 					if (!arg3) {
-						printk("Usage: send <id|all> reset <zro|acc|bat>\n");
+						printk("Usage: send <id|all> reset <zro|acc|bat|tcal>\n");
 						printk("Example: send 0 reset zro\n");
 						printk("Example: send all reset acc\n");
 						continue;
@@ -592,9 +607,12 @@ static void console_thread(void)
 					} else if (strcmp(arg3, "bat") == 0) {
 						reset_cmd = ESB_PONG_FLAG_RESET_BAT;
 						reset_name = "Battery reset";
+					} else if (strcmp(arg3, "tcal") == 0) {
+						reset_cmd = ESB_PONG_FLAG_RESET_TCAL;
+						reset_name = "Temperature calibration reset";
 					} else {
 						printk("Unknown reset command: %s\n", arg3);
-						printk("Available: zro, acc, bat\n");
+						printk("Available: zro, acc, bat, tcal\n");
 						continue;
 					}
 
@@ -616,6 +634,56 @@ static void console_thread(void)
 						printk("Ping request sent to tracker %d\n", tracker_id);
 					}
 					continue;
+				} else if (strcmp(arg2, "tcal") == 0) {
+					// tcal command - supports "auto on/off" and "clear"
+					if (!arg3) {
+						printk("Usage: send <id|all> tcal <auto on|auto off|clear>\n");
+						printk("Example: send 0 tcal auto on  - Enable auto-calibration on tracker 0\n");
+						printk("Example: send all tcal auto off - Disable auto-calibration on all trackers\n");
+						printk("Example: send 0 tcal clear - Clear temperature calibration on tracker 0\n");
+						continue;
+					}
+
+					if (strcmp(arg3, "auto") == 0) {
+						if (!arg4) {
+							printk("Usage: send <id|all> tcal auto <on|off>\n");
+							continue;
+						}
+
+						uint8_t tcal_cmd = 0xFF;
+						const char *tcal_name = NULL;
+
+						if (strcmp(arg4, "on") == 0) {
+							tcal_cmd = ESB_PONG_FLAG_TCAL_AUTO_ON;
+							tcal_name = "T-Cal auto-calibration enable";
+						} else if (strcmp(arg4, "off") == 0) {
+							tcal_cmd = ESB_PONG_FLAG_TCAL_AUTO_OFF;
+							tcal_name = "T-Cal auto-calibration disable";
+						} else {
+							printk("Invalid tcal auto argument: %s (use 'on' or 'off')\n", arg4);
+							continue;
+						}
+
+						if (target_all) {
+							esb_send_remote_command_all(tcal_cmd);
+							printk("%s request sent to all trackers\n", tcal_name);
+						} else {
+							esb_send_remote_command(tracker_id, tcal_cmd);
+							printk("%s request sent to tracker %d\n", tcal_name, tracker_id);
+						}
+					} else if (strcmp(arg3, "clear") == 0) {
+						// clear command - clear tcal data
+						if (target_all) {
+							esb_send_remote_command_all(ESB_PONG_FLAG_RESET_TCAL);
+							printk("T-Cal clear request sent to all trackers\n");
+						} else {
+							esb_send_remote_command(tracker_id, ESB_PONG_FLAG_RESET_TCAL);
+							printk("T-Cal clear request sent to tracker %d\n", tracker_id);
+						}
+					} else {
+						printk("Unknown tcal subcommand: %s (use 'auto' or 'clear')\n", arg3);
+					}
+					continue;
 				}
 
 				if (cmd_flag != 0xFF) {
@@ -630,7 +698,7 @@ static void console_thread(void)
 					printk("Unknown command: %s\n", arg2);
 					printk(
 						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
-						"reset, ping\n"
+						"reset, ping, tcal\n"
 					);
 				}
 			}

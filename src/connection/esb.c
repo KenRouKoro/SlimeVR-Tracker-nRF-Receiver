@@ -35,8 +35,9 @@
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 
 // TDMA parameters (copied from Tracker)
+#define TDMA_ENABLED 0
 #define TDMA_NUM_TRACKERS 10
-#define TDMA_PACKETS_PER_SECOND 125 // Target TPS per tracker
+#define TDMA_PACKETS_PER_SECOND 111 // Target TPS per tracker
 #define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
 #define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
 
@@ -507,19 +508,37 @@ void event_handler(struct esb_evt const *event)
 							}
 						}
 
-						LOG_DBG(
-							"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld us StdDev=%u us Range=[%d, %d] "
-							"RxTimeDiff=%s%llu us",
-							tracker_id,
-							stats->count,
-							stats->violations,
-							mean,
-							std_dev,
-							stats->min_offset,
-							stats->max_offset,
-							rx_time_diff_ticks >= 0 ? "+" : "-",
-							rx_time_diff_us
-						);
+#if TDMA_ENABLED
+						if (stats->violations > 3) {
+							LOG_WRN(
+								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld us StdDev=%u us Range=[%d, %d] "
+								"RxTimeDiff=%s%llu us",
+								tracker_id,
+								stats->count,
+								stats->violations,
+								mean,
+								std_dev,
+								stats->min_offset,
+								stats->max_offset,
+								rx_time_diff_ticks >= 0 ? "+" : "-",
+								rx_time_diff_us
+							);
+						} else {
+							LOG_DBG(
+								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld us StdDev=%u us Range=[%d, %d] "
+								"RxTimeDiff=%s%llu us",
+								tracker_id,
+								stats->count,
+								stats->violations,
+								mean,
+								std_dev,
+								stats->min_offset,
+								stats->max_offset,
+								rx_time_diff_ticks >= 0 ? "+" : "-",
+								rx_time_diff_us
+							);
+						}
+#endif
 					}
 
 					// Reset stats
