@@ -42,8 +42,8 @@
 		ctx-settle-time-us = <23>;
 		crx-gpios = <&gpio0 24 GPIO_ACTIVE_HIGH>;
 		crx-settle-time-us = <8>;
-		tx-gain-db = <22>;
-		rx-gain-db = <12>;
+		//tx-gain-db = <22>;
+		//rx-gain-db = <12>;
 	};
 
 	leds {
