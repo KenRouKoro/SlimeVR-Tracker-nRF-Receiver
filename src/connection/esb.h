@@ -52,6 +52,9 @@
 #define ESB_PONG_FLAG_RESET_ACC 0x0F
 #define ESB_PONG_FLAG_RESET_BAT 0x10
 #define ESB_PONG_FLAG_PING 0x11
+#define ESB_PONG_FLAG_RESET_TCAL 0x12
+#define ESB_PONG_FLAG_TCAL_AUTO_ON 0x13  // Enable T-Cal auto-calibration
+#define ESB_PONG_FLAG_TCAL_AUTO_OFF 0x14 // Disable T-Cal auto-calibration
 
 void event_handler(struct esb_evt const *event);
 int clocks_start(void);
