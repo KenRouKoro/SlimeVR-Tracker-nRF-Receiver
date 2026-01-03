@@ -144,11 +144,6 @@ zephyr_udc0: &usbd {
 		compatible = "zephyr,cdc-acm-uart";
 	};
 };
-
-&cryptocell {
-	status = "disabled";
-};
-
 &nfct {
 	status = "disabled";
 };
