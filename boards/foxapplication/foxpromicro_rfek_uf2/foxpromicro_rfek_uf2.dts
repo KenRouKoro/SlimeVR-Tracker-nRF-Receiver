@@ -28,9 +28,6 @@
 	chosen {
 		zephyr,console = &cdc_acm_uart;
 		zephyr,shell-uart = &cdc_acm_uart;
-		zephyr,uart-mcumgr = &cdc_acm_uart;
-		zephyr,bt-mon-uart = &cdc_acm_uart;
-		zephyr,bt-c2h-uart = &cdc_acm_uart;
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
 		zephyr,ieee802154 = &ieee802154;
@@ -57,7 +54,7 @@
 	buttons {
 		compatible = "gpio-keys";
 		button0: button_0 {
-			gpios = <&gpio0 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			gpios = <&gpio1 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "Push button switch 0";
 		};
 	};
@@ -65,16 +62,11 @@
 	aliases {
 		sw0 = &button0;
 		pwm-led0 = &pwm_led0;
-		watchdog0 = &wdt0;
 	};
 
 	zephyr,user {
 		led-gpios = <&gpio0 15 GPIO_OPEN_SOURCE>;
 	};
-};
-
-&reg0 {
-	status = "disabled";
 };
 
 &reg1 {
