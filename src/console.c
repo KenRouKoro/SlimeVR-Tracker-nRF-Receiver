@@ -165,7 +165,7 @@ static void print_help(void)
 	printk(
 		"Remote Commands:\n"
 		"  send <id|all> <command>    Send remote command to tracker(s)\n"
-		"    Commands: shutdown, calibrate, 6-side, meow, scan, mag,\n"
+		"    Commands: shutdown, calibrate, 6-side, meow, scan, mag, magcal,\n"
 		"              reboot, clear, dfu, channel <0-100>, clearchannel,\n"
 		"              sens <x,y,z|reset>, reset <zro|acc|bat|tcal>, ping\n"
 	);
@@ -439,7 +439,7 @@ static void console_thread(void)
 				printk("  send 3 clear         - Clear pairing on tracker 3\n");
 				printk("  send all dfu         - Enter DFU mode on all trackers\n");
 				printk(
-					"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
+					"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, magcal, reboot, clear, dfu, sens, "
 					"reset, ping, tcal\n"
 				);
 			} else {
@@ -481,6 +481,9 @@ static void console_thread(void)
 				} else if (strcmp(arg2, "mag") == 0) {
 					cmd_flag = ESB_PONG_FLAG_MAG_CLEAR;
 					cmd_name = "Magnetometer clear";
+				} else if (strcmp(arg2, "magcal") == 0) {
+					cmd_flag = ESB_PONG_FLAG_MAG_CAL;
+					cmd_name = "Magnetometer calibration";
 				} else if (strcmp(arg2, "reboot") == 0) {
 					cmd_flag = ESB_PONG_FLAG_REBOOT;
 					cmd_name = "Reboot";
@@ -728,7 +731,7 @@ static void console_thread(void)
 				} else {
 					printk("Unknown command: %s\n", arg2);
 					printk(
-						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, fusion, sens, "
+						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, magcal, reboot, clear, dfu, fusion, sens, "
 						"reset, ping, tcal\n"
 					);
 				}
