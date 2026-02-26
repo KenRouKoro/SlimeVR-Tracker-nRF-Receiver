@@ -59,6 +59,8 @@
 #define ESB_PONG_FLAG_TCAL_BOOT_ON 0x16  // Enable T-Cal boot calibration
 #define ESB_PONG_FLAG_TCAL_BOOT_OFF 0x17 // Disable T-Cal boot calibration
 #define ESB_PONG_FLAG_MAG_CAL 0x18       // Trigger magnetometer calibration
+#define ESB_PONG_FLAG_MAG_ON 0x19        // Enable magnetometer
+#define ESB_PONG_FLAG_MAG_OFF 0x1A       // Disable magnetometer
 
 void event_handler(struct esb_evt const *event);
 int clocks_start(void);

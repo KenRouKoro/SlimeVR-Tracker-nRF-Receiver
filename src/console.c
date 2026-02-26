@@ -165,9 +165,10 @@ static void print_help(void)
 	printk(
 		"Remote Commands:\n"
 		"  send <id|all> <command>    Send remote command to tracker(s)\n"
-		"    Commands: shutdown, calibrate, 6-side, meow, scan, mag, magcal,\n"
-		"              reboot, clear, dfu, channel <0-100>, clearchannel,\n"
-		"              sens <x,y,z|reset>, reset <zro|acc|bat|tcal>, ping\n"
+		"    Commands: shutdown, calibrate, 6-side, meow, scan,\n"
+		"              mag <on|off|clear|cal>, reboot, clear, dfu,\n"
+		"              channel <0-100>, clearchannel,\n"
+		"              sens <x,y,z|reset>, reset <zro|acc|bat|mag|tcal>, ping\n"
 	);
 
 	printk(
@@ -439,7 +440,7 @@ static void console_thread(void)
 				printk("  send 3 clear         - Clear pairing on tracker 3\n");
 				printk("  send all dfu         - Enter DFU mode on all trackers\n");
 				printk(
-					"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, magcal, reboot, clear, dfu, sens, "
+					"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
 					"reset, ping, tcal\n"
 				);
 			} else {
@@ -479,11 +480,44 @@ static void console_thread(void)
 					cmd_flag = ESB_PONG_FLAG_SCAN;
 					cmd_name = "Sensor scan";
 				} else if (strcmp(arg2, "mag") == 0) {
-					cmd_flag = ESB_PONG_FLAG_MAG_CLEAR;
-					cmd_name = "Magnetometer clear";
-				} else if (strcmp(arg2, "magcal") == 0) {
-					cmd_flag = ESB_PONG_FLAG_MAG_CAL;
-					cmd_name = "Magnetometer calibration";
+					// mag command - supports "on", "off", "clear", "cal"
+					if (!arg3) {
+						printk("Usage: send <id|all> mag <on|off|clear|cal>\n");
+						printk("  on    - Enable magnetometer\n");
+						printk("  off   - Disable magnetometer\n");
+						printk("  clear - Clear magnetometer calibration\n");
+						printk("  cal   - Start magnetometer calibration\n");
+						continue;
+					}
+
+					uint8_t mag_cmd = 0xFF;
+					const char *mag_name = NULL;
+
+					if (strcmp(arg3, "on") == 0) {
+						mag_cmd = ESB_PONG_FLAG_MAG_ON;
+						mag_name = "Magnetometer enable";
+					} else if (strcmp(arg3, "off") == 0) {
+						mag_cmd = ESB_PONG_FLAG_MAG_OFF;
+						mag_name = "Magnetometer disable";
+					} else if (strcmp(arg3, "clear") == 0) {
+						mag_cmd = ESB_PONG_FLAG_MAG_CLEAR;
+						mag_name = "Magnetometer calibration clear";
+					} else if (strcmp(arg3, "cal") == 0 || strcmp(arg3, "calibrate") == 0) {
+						mag_cmd = ESB_PONG_FLAG_MAG_CAL;
+						mag_name = "Magnetometer calibration";
+					} else {
+						printk("Unknown mag subcommand: %s (use 'on', 'off', 'clear' or 'cal')\n", arg3);
+						continue;
+					}
+
+					if (target_all) {
+						esb_send_remote_command_all(mag_cmd);
+						printk("%s request sent to all trackers\n", mag_name);
+					} else {
+						esb_send_remote_command(tracker_id, mag_cmd);
+						printk("%s request sent to tracker %d\n", mag_name, tracker_id);
+					}
+					continue;
 				} else if (strcmp(arg2, "reboot") == 0) {
 					cmd_flag = ESB_PONG_FLAG_REBOOT;
 					cmd_name = "Reboot";
@@ -595,7 +629,7 @@ static void console_thread(void)
 				} else if (strcmp(arg2, "reset") == 0) {
 					// reset command - needs arg3 for subcommand
 					if (!arg3) {
-						printk("Usage: send <id|all> reset <zro|acc|bat|tcal>\n");
+						printk("Usage: send <id|all> reset <zro|acc|bat|mag|tcal>\n");
 						printk("Example: send 0 reset zro\n");
 						printk("Example: send all reset acc\n");
 						continue;
@@ -613,12 +647,15 @@ static void console_thread(void)
 					} else if (strcmp(arg3, "bat") == 0) {
 						reset_cmd = ESB_PONG_FLAG_RESET_BAT;
 						reset_name = "Battery reset";
+					} else if (strcmp(arg3, "mag") == 0) {
+						reset_cmd = ESB_PONG_FLAG_MAG_CLEAR;
+						reset_name = "Magnetometer calibration reset";
 					} else if (strcmp(arg3, "tcal") == 0) {
 						reset_cmd = ESB_PONG_FLAG_RESET_TCAL;
 						reset_name = "Temperature calibration reset";
 					} else {
 						printk("Unknown reset command: %s\n", arg3);
-						printk("Available: zro, acc, bat, tcal\n");
+						printk("Available: zro, acc, bat, mag, tcal\n");
 						continue;
 					}
 
@@ -643,7 +680,7 @@ static void console_thread(void)
 				} else if (strcmp(arg2, "tcal") == 0) {
 					// tcal command - supports "auto on/off", "boot on/off" and "clear"
 					if (!arg3) {
-						printk("Usage: send <id|all> tcal <auto on|auto off|boot on|boot off|boot on|boot off|clear>\n");
+						printk("Usage: send <id|all> tcal <auto on|auto off|boot on|boot off|clear>\n");
 						printk("Example: send 0 tcal auto on  - Enable auto-calibration on tracker 0\n");
 						printk("Example: send all tcal auto off - Disable auto-calibration on all trackers\n");
 						printk("Example: send 0 tcal boot on - Enable boot calibration on tracker 0\n");
@@ -731,7 +768,7 @@ static void console_thread(void)
 				} else {
 					printk("Unknown command: %s\n", arg2);
 					printk(
-						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, magcal, reboot, clear, dfu, fusion, sens, "
+						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, fusion, sens, "
 						"reset, ping, tcal\n"
 					);
 				}
