@@ -78,6 +78,7 @@ static void print_info(void)
 {
 	printk(CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT "\n");
 	printk(FW_STRING);
+	printk("Repo: %s | Branch: %s | Author: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH, FW_GIT_AUTHOR);
 
 	printk("\nBoard: " CONFIG_BOARD "\n");
 	printk("SOC: " CONFIG_SOC "\n");
@@ -271,6 +272,7 @@ static void console_thread(void)
 
 	printk("*** " CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT " ***\n");
 	printk(FW_STRING);
+	printk("Repo: %s | Branch: %s | Author: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH, FW_GIT_AUTHOR);
 
 	// Print help on startup
 	print_help();
