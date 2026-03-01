@@ -1454,6 +1454,12 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 		case ESB_PONG_FLAG_RESET_TCAL:
 			cmd_name = "RESET_TCAL";
 			break;
+		case ESB_PONG_FLAG_TCAL_ON:
+			cmd_name = "TCAL_ON";
+			break;
+		case ESB_PONG_FLAG_TCAL_OFF:
+			cmd_name = "TCAL_OFF";
+			break;
 		case ESB_PONG_FLAG_TCAL_AUTO_ON:
 			cmd_name = "TCAL_AUTO_ON";
 			break;
@@ -1544,6 +1550,12 @@ void esb_send_remote_command_all(uint8_t command_flag)
 		break;
 	case ESB_PONG_FLAG_RESET_TCAL:
 		cmd_name = "RESET_TCAL";
+		break;
+	case ESB_PONG_FLAG_TCAL_ON:
+		cmd_name = "TCAL_ON";
+		break;
+	case ESB_PONG_FLAG_TCAL_OFF:
+		cmd_name = "TCAL_OFF";
 		break;
 	case ESB_PONG_FLAG_TCAL_AUTO_ON:
 		cmd_name = "TCAL_AUTO_ON";

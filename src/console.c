@@ -678,9 +678,11 @@ static void console_thread(void)
 					}
 					continue;
 				} else if (strcmp(arg2, "tcal") == 0) {
-					// tcal command - supports "auto on/off", "boot on/off" and "clear"
+					// tcal command - supports "on/off", "auto on/off", "boot on/off" and "clear"
 					if (!arg3) {
-						printk("Usage: send <id|all> tcal <auto on|auto off|boot on|boot off|clear>\n");
+						printk("Usage: send <id|all> tcal <on|off|auto on|auto off|boot on|boot off|clear>\n");
+						printk("Example: send 0 tcal on       - Enable temperature calibration on tracker 0\n");
+						printk("Example: send all tcal off    - Disable temperature calibration on all trackers\n");
 						printk("Example: send 0 tcal auto on  - Enable auto-calibration on tracker 0\n");
 						printk("Example: send all tcal auto off - Disable auto-calibration on all trackers\n");
 						printk("Example: send 0 tcal boot on - Enable boot calibration on tracker 0\n");
@@ -688,7 +690,25 @@ static void console_thread(void)
 						continue;
 					}
 
-					if (strcmp(arg3, "auto") == 0) {
+					if (strcmp(arg3, "on") == 0) {
+						// Enable T-Cal
+						if (target_all) {
+							esb_send_remote_command_all(ESB_PONG_FLAG_TCAL_ON);
+							printk("T-Cal enable request sent to all trackers\n");
+						} else {
+							esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TCAL_ON);
+							printk("T-Cal enable request sent to tracker %d\n", tracker_id);
+						}
+					} else if (strcmp(arg3, "off") == 0) {
+						// Disable T-Cal
+						if (target_all) {
+							esb_send_remote_command_all(ESB_PONG_FLAG_TCAL_OFF);
+							printk("T-Cal disable request sent to all trackers\n");
+						} else {
+							esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TCAL_OFF);
+							printk("T-Cal disable request sent to tracker %d\n", tracker_id);
+						}
+					} else if (strcmp(arg3, "auto") == 0) {
 						if (!arg4) {
 							printk("Usage: send <id|all> tcal auto <on|off>\n");
 							continue;
@@ -752,7 +772,7 @@ static void console_thread(void)
 							printk("%s request sent to tracker %d\n", tcal_name, tracker_id);
 						}
 					} else {
-						printk("Unknown tcal subcommand: %s (use 'auto', 'boot' or 'clear')\n", arg3);
+						printk("Unknown tcal subcommand: %s (use 'on', 'off', 'auto', 'boot' or 'clear')\n", arg3);
 					}
 					continue;
 				}
