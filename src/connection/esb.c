@@ -111,6 +111,9 @@ struct packet_stats {
 	uint32_t packets_in_last_second; // Number of packets in the last second
 	uint64_t last_tps_time;          // Last TPS calculation timestamp
 	uint32_t current_tps;            // Current TPS (packets per second)
+	// Per-status-period counters (filled into status packet data[4]/data[5], reset after each status packet)
+	uint16_t status_received; // Packets received since last status packet
+	uint16_t status_lost;     // Packets lost (gaps) since last status packet
 };
 
 static struct packet_stats tracker_stats[MAX_TRACKERS] = {0};
@@ -173,6 +176,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		stats->normal_packets++;
 		stats->last_sequence = received_seq;
 		stats->first_packet = false;
+		stats->status_received++;
 		LOG_DBG("First packet: tracker=%d, seq=%d", tracker_id, received_seq);
 		return 0;
 	}
@@ -195,6 +199,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		packet_count[tracker_id]++;
 		stats->normal_packets++;
 		stats->last_sequence = received_seq;
+		stats->status_received++;
 		LOG_DBG("Normal packet: tracker=%d, seq=%d", tracker_id, received_seq);
 		return 0;
 	}
@@ -236,6 +241,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		last_packet_sequence[tracker_id] = received_seq;
 		packet_count[tracker_id]++;
 		stats->last_sequence = received_seq;
+		stats->status_received++;
 		// Restart events are kept at WARNING level because this is important information
 		LOG_WRN(
 			"Tracker restart detected: tracker=%d, last_seq=%d, new_seq=%d, jump=%d",
@@ -251,7 +257,10 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 	if (diff_forward > 0 && diff_forward <= 80) {
 		stats->total_received++;
 		stats->gap_events++;
-		stats->total_gaps += (diff_forward - 1); // Estimate number of lost packets
+		uint8_t gaps = diff_forward - 1;
+		stats->total_gaps += gaps; // Estimate number of lost packets
+		stats->status_received++;
+		stats->status_lost += gaps;
 		last_packet_sequence[tracker_id] = received_seq;
 		packet_count[tracker_id]++;
 		stats->last_sequence = received_seq;
@@ -260,7 +269,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 			"Gap detected: tracker=%d, seq=%d, gap=%d (forward=%d)",
 			tracker_id,
 			received_seq,
-			diff_forward - 1,
+			gaps,
 			diff_forward
 		);
 		return 1;
@@ -901,6 +910,16 @@ void event_handler(struct esb_evt const *event)
 				}
 
 				// Forward packet for other cases (normal, potential loss, reboot)
+				// For status packets (type 3), fill in packet loss statistics before forwarding
+				if (rx_payload.data[0] == 3) {
+					struct packet_stats *stats = &tracker_stats[tracker_id];
+					rx_payload.data[4] = stats->status_received;
+					rx_payload.data[5] = stats->status_lost;
+					rx_payload.data[6] = 0; // windows_hit (not implemented)
+					rx_payload.data[7] = 0; // windows_missed (not implemented)
+					stats->status_received = 0;
+					stats->status_lost = 0;
+				}
 				hid_write_packet_n(rx_payload.data,
 								   rx_payload.rssi); // write to hid endpoint
 			} break;
