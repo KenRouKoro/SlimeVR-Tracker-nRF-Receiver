@@ -1,10 +1,12 @@
 on:
   pull_request:
     branches:
-      - master
+      - dev
+      - main
   push:
     branches:
-      - master
+      - dev
+      - main
   create:
   workflow_dispatch:
 
