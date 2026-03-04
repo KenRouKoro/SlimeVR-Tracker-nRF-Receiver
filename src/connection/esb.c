@@ -1628,8 +1628,8 @@ void esb_reset_all_stats(void)
 // Sets the RF channel for all trackers
 void esb_set_all_trackers_channel(uint8_t channel)
 {
-	if (channel > 100) {
-		LOG_ERR("Invalid channel value: %u (must be 0-100)", channel);
+	if (channel < 1 || channel > 100) {
+		LOG_ERR("Invalid channel value: %u (must be 1-100)", channel);
 		return;
 	}
 
@@ -1668,8 +1668,8 @@ void esb_clear_all_trackers_channel(void)
 // Set the receiver's RF channel (local, does not affect trackers)
 void esb_set_receiver_channel(uint8_t channel)
 {
-	if (channel > 100) {
-		LOG_ERR("Invalid channel value: %u (must be 0-100)", channel);
+	if (channel < 1 || channel > 100) {
+		LOG_ERR("Invalid channel value: %u (must be 1-100)", channel);
 		return;
 	}
 
