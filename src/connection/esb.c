@@ -95,6 +95,25 @@ static atomic_t channel_ack_mask
 static int64_t channel_change_timeout = 0; // Timestamp for channel change timeout
 #define CHANNEL_CHANGE_TIMEOUT_MS 30000    // Timeout duration for waiting for all trackers to acknowledge
 
+// Pairing state (declared here for ISR access in event_handler)
+static bool esb_pairing = false;
+static bool esb_paired = false;
+static bool esb_clearing = false;
+
+// Cached receiver device address (set once at init, used by ISR for pairing responses)
+static uint8_t receiver_device_addr[6] = {0};
+
+// NVS async write infrastructure
+struct nvs_write_request {
+	uint16_t id;
+	uint8_t len;
+	uint8_t data[8]; // large enough for uint64_t
+};
+
+K_MSGQ_DEFINE(nvs_write_msgq, sizeof(struct nvs_write_request), 20, 4);
+
+static void nvs_writer_thread(void);
+
 // Packet statistics structure
 struct packet_stats {
 	uint32_t total_received;    // Total number of packets received (excluding duplicates)
@@ -141,8 +160,39 @@ LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
 K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(nvs_writer_thread_id, 1024, nvs_writer_thread, NULL, NULL, NULL, 9, 0, 0);
 
 static bool esb_parse_pair(const uint8_t packet[8]);
+static void process_pairing_queue(void);
+
+// Find tracker by address without locks.
+// On single-core ARM Cortex-M, compiler barrier ensures correct ordering.
+// stored_tracker_addr[] is append-only from ISR perspective — thread writes
+// the address first, then increments count with a compiler barrier in between.
+static inline int esb_find_tracker(uint64_t addr)
+{
+	if (addr == 0) {
+		return -1;
+	}
+	uint8_t count = stored_trackers; // single atomic byte read on ARM
+	__asm__ volatile("" ::: "memory"); // compiler barrier: ensure count is read before array
+	for (int i = 0; i < count && i < MAX_TRACKERS; i++) {
+		if (stored_tracker_addr[i] == addr) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+// Queue an NVS write for async processing (thread-safe, non-blocking)
+static inline void nvs_write_async(uint16_t id, const void *data, size_t len)
+{
+	struct nvs_write_request req = {.id = id, .len = (uint8_t)MIN(len, sizeof(req.data))};
+	memcpy(req.data, data, req.len);
+	if (k_msgq_put(&nvs_write_msgq, &req, K_NO_WAIT) != 0) {
+		LOG_WRN("NVS write queue full, dropping write for id %u", id);
+	}
+}
 
 static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 {
@@ -441,34 +491,83 @@ void event_handler(struct esb_evt const *event)
 			case 1: // ACK packet
 				LOG_DBG("RX ACK len=%u pipe=%u data=%02X", rx_payload.length, rx_payload.pipe, rx_payload.data[0]);
 				break;
-			case 8: {
-				struct pairing_event evt = {0};
-				memcpy(evt.packet, rx_payload.data, sizeof(evt.packet));
-				LOG_DBG("rx: %16llX", *(uint64_t *)evt.packet);
-				int q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
-				if (q_err) {
-					struct pairing_event discarded;
-					if (k_msgq_get(&esb_pairing_msgq, &discarded, K_NO_WAIT) == 0) {
-						q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
+			case 8: { // Pairing packet (unified handler)
+				uint8_t step = rx_payload.data[1];
+				LOG_DBG("RX pairing pkt step=%u pipe=%u", step, rx_payload.pipe);
+
+				if (step == 0) {
+					// Step 0: Pairing request - handle known devices directly in ISR
+					uint64_t raw_addr = 0;
+					memcpy(&raw_addr, rx_payload.data, sizeof(raw_addr));
+					uint64_t found_addr = (raw_addr >> 16) & 0xFFFFFFFFFFFF;
+					uint8_t checksum = crc8_ccitt(0x07, &rx_payload.data[2], 6);
+					if (checksum == 0) {
+						checksum = 8;
 					}
-					if (q_err) {
-						LOG_WRN("ACK queue full, dropping packet type %u", evt.packet[1]);
+
+					if (checksum != rx_payload.data[0] || found_addr == 0) {
+						LOG_WRN("Invalid pairing checksum or address");
+						break;
 					}
-				}
-				switch (evt.packet[1]) {
-				case 1: // receives ack generated from last packet
-					LOG_DBG("RX Pairing Sent ACK");
-					break;
-				case 2: // should "acknowledge" pairing data sent from
-						// receiver
-					LOG_DBG("RX Pairing ACK Receiver");
-					break;
-				case 0:
-					LOG_INF("RX Pairing Request");
-					break;
-				default:
-					LOG_WRN("Unexpected pairing packet type %u", evt.packet[1]);
-					break;
+
+					// ISR-safe lockless lookup of known devices
+					int known_id = esb_find_tracker(found_addr);
+
+					if (!esb_pairing) {
+						if (known_id >= 0) {
+							LOG_WRN(
+								"Received pairing request from known tracker %d, but pairing mode inactive",
+								known_id
+							);
+						} else {
+							LOG_INF("Pairing request from unknown %012llX, pairing mode inactive", found_addr);
+						}
+						break;
+					}
+
+					if (known_id >= 0) {
+						// Known device + pairing mode: respond immediately from ISR (no lock, no NVS)
+						struct esb_payload response = {
+							.pipe = 0,
+							.noack = false,
+							.length = 8,
+						};
+						response.data[0] = checksum;
+						response.data[1] = (uint8_t)known_id;
+						memcpy(&response.data[2], receiver_device_addr, 6);
+
+						esb_flush_tx();
+						int werr = esb_write_payload(&response);
+						if (werr) {
+							LOG_WRN("Failed to queue re-pair response for tracker %d: %d", known_id, werr);
+						} else {
+							LOG_INF("Re-pair response queued for known tracker %d", known_id);
+						}
+					} else {
+						// Unknown device + pairing mode: queue for thread processing
+						struct pairing_event evt = {0};
+						memcpy(evt.packet, rx_payload.data, sizeof(evt.packet));
+
+						int q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
+						if (q_err) {
+							// Drop one and retry
+							struct pairing_event discarded;
+							(void)k_msgq_get(&esb_pairing_msgq, &discarded, K_NO_WAIT);
+							q_err = k_msgq_put(&esb_pairing_msgq, &evt, K_NO_WAIT);
+						}
+
+						if (q_err) {
+							LOG_WRN("Pairing queue full, dropping request from %012llX", found_addr);
+						} else {
+							LOG_INF("New device %012llX pairing request queued", found_addr);
+						}
+					}
+				} else if (step == 1) {
+					LOG_DBG("RX Pairing Sent ACK (step 1)");
+				} else if (step == 2) {
+					LOG_DBG("RX Pairing Confirm (step 2)");
+				} else {
+					LOG_WRN("Unexpected pairing packet type %u", step);
 				}
 				break;
 			} break;
@@ -1115,9 +1214,38 @@ inline void esb_set_addr_paired(void)
 	memcpy(addr_prefix, addr_buffer + 8, sizeof(addr_prefix));
 }
 
-static bool esb_pairing = false;
-static bool esb_paired = false;
-static bool esb_clearing = false;
+// Unified mode: pipe 0 uses discovery address (pairing), pipes 1-7 use paired address (data)
+void esb_set_addr_unified(void)
+{
+	// Pipe 0: discovery base address for pairing
+	memcpy(base_addr_0, discovery_base_addr_0, sizeof(base_addr_0));
+
+	// Pipes 1-7: paired base address for data/PING
+	uint64_t *addr = (uint64_t *)NRF_FICR->DEVICEADDR;
+	uint8_t buf[6] = {0};
+	memcpy(buf, addr, 6);
+	uint8_t addr_buffer[16] = {0};
+	for (int i = 0; i < 4; i++) {
+		addr_buffer[i] = buf[i];
+		addr_buffer[i + 4] = buf[i] + buf[4];
+	}
+	for (int i = 0; i < 8; i++) {
+		addr_buffer[i + 8] = buf[5] + i;
+	}
+	for (int i = 0; i < 16; i++) {
+		if (addr_buffer[i] == 0x00 || addr_buffer[i] == 0x55
+			|| addr_buffer[i] == 0xAA) { // Avoid invalid addresses (see nrf datasheet)
+			addr_buffer[i] += 8;
+		}
+	}
+	memcpy(base_addr_1, addr_buffer + 4, sizeof(base_addr_1));
+
+	// Prefix: pipe 0 = discovery, pipes 1-7 = paired
+	addr_prefix[0] = discovery_addr_prefix[0];
+	for (int i = 1; i < 8; i++) {
+		addr_prefix[i] = addr_buffer[8 + i];
+	}
+}
 
 int esb_add_pair(uint64_t addr, bool checksum)
 {
@@ -1143,8 +1271,11 @@ int esb_add_pair(uint64_t addr, bool checksum)
 			return -ENOSPC;
 		}
 		assigned_id = stored_trackers;
+		// Write addr first, then barrier, then increment count
+		// This ensures ISR lockless reads see consistent data
 		stored_tracker_addr[assigned_id] = addr;
-		stored_trackers++;
+		__asm__ volatile("" ::: "memory"); // compiler barrier
+		stored_trackers = assigned_id + 1;
 		new_entry = true;
 	}
 
@@ -1152,8 +1283,10 @@ int esb_add_pair(uint64_t addr, bool checksum)
 
 	if (new_entry) {
 		LOG_INF("Added device on id %d with address %012llX", assigned_id, addr);
-		sys_write(STORED_ADDR_0 + assigned_id, NULL, &stored_tracker_addr[assigned_id], sizeof(stored_tracker_addr[0]));
-		sys_write(STORED_TRACKERS, NULL, &stored_trackers, sizeof(stored_trackers));
+		// Async NVS writes (non-blocking)
+		nvs_write_async(STORED_ADDR_0 + assigned_id, &stored_tracker_addr[assigned_id], sizeof(stored_tracker_addr[0]));
+		uint8_t count = stored_trackers;
+		nvs_write_async(STORED_TRACKERS, &count, sizeof(count));
 	} else {
 		LOG_INF("Device already stored with id %d", assigned_id);
 	}
@@ -1183,16 +1316,21 @@ void esb_pop_pair(void)
 
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	if (stored_trackers > 0) {
-		stored_trackers--;
-		removed_id = stored_trackers;
+		removed_id = stored_trackers - 1;
 		removed_addr = stored_tracker_addr[removed_id];
+		// Zero entry first, then barrier, then decrement count
+		// This ensures ISR lockless reads never match a removed entry
 		stored_tracker_addr[removed_id] = 0;
+		__asm__ volatile("" ::: "memory"); // compiler barrier
+		stored_trackers = (uint8_t)removed_id;
 	}
 	k_mutex_unlock(&tracker_store_lock);
 
 	if (removed_id >= 0) {
-		sys_write(STORED_TRACKERS, NULL, &stored_trackers, sizeof(stored_trackers));
-		sys_write(STORED_ADDR_0 + removed_id, NULL, &stored_tracker_addr[removed_id], sizeof(stored_tracker_addr[0]));
+		uint8_t count = stored_trackers;
+		nvs_write_async(STORED_TRACKERS, &count, sizeof(count));
+		uint64_t zero_addr = 0;
+		nvs_write_async(STORED_ADDR_0 + removed_id, &zero_addr, sizeof(zero_addr));
 		LOG_INF("Removed device on id %d with address %012llX", removed_id, removed_addr);
 	} else {
 		LOG_WRN("No devices to remove");
@@ -1250,110 +1388,77 @@ static bool esb_parse_pair(const uint8_t packet[8])
 
 void esb_start_pairing(void)
 {
-	LOG_INF("Starting pairing mode (non-blocking)");
-	esb_set_addr_discovery();
-	esb_initialize(false);
-	esb_start_rx();
-	tx_payload_pair.noack = false;
-	uint64_t *addr = (uint64_t *)NRF_FICR->DEVICEADDR;
-	memcpy(&tx_payload_pair.data[2], addr, 6);
-	LOG_INF("Device address: %012llX", *addr & 0xFFFFFFFFFFFF);
-	set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
+	LOG_INF("Pairing mode enabled (unified)");
 	esb_pairing = true;
 	k_msgq_purge(&esb_pairing_msgq);
+	set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 }
 
-void esb_pair(void)
+// Process new device pairing requests from the queue (called from esb_thread, non-blocking)
+static void process_pairing_queue(void)
 {
-	LOG_INF("Pairing");
-	esb_set_addr_discovery();
-	esb_initialize(false);
-	esb_start_rx();
-	tx_payload_pair.noack = false;
-	uint64_t *addr = (uint64_t *)NRF_FICR->DEVICEADDR; // Use device address as unique identifier (although it is
-													   // not actually guaranteed, see datasheet)
-	memcpy(&tx_payload_pair.data[2], addr, 6);
-	LOG_INF("Device address: %012llX", *addr & 0xFFFFFFFFFFFF);
-	set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
-	esb_pairing = true;
-	k_msgq_purge(&esb_pairing_msgq);
-	while (esb_pairing) {
-		if (!esb_initialized) {
-			esb_initialize(false);
-			esb_start_rx();
+	struct pairing_event evt;
+	while (k_msgq_get(&esb_pairing_msgq, &evt, K_NO_WAIT) == 0) {
+		if (evt.packet[1] != 0) {
+			continue; // Only process step 0 (pairing request)
 		}
 
-		struct pairing_event evt;
-		int q_err = k_msgq_get(&esb_pairing_msgq, &evt, K_MSEC(10));
-		if (q_err != 0) {
+		bool ack_ready = esb_parse_pair(evt.packet);
+		if (!ack_ready) {
+			LOG_DBG("Pairing request invalid, not queueing response");
 			continue;
 		}
 
-		switch (evt.packet[1]) {
-		case 0: {
-			bool ack_ready = esb_parse_pair(evt.packet);
-			if (!ack_ready) {
-				LOG_DBG("Pairing request invalid, not queueing response");
-				break;
-			}
-			int tx_err = esb_write_payload(&tx_payload_pair);
-			if (tx_err == -ENOSPC) {
-				esb_flush_tx();
-				tx_err = esb_write_payload(&tx_payload_pair);
-			}
-			if (tx_err) {
-				LOG_ERR("Failed to queue pairing response: %d", tx_err);
-			} else {
-				LOG_DBG("tx: %16llX", *(uint64_t *)tx_payload_pair.data);
-			}
-			break;
-		}
-		case 2:
-			esb_flush_tx();
-			break;
-		case 1:
-			// Tracker acknowledged previous response, nothing to do
-			break;
-		default:
-			LOG_WRN("Unhandled pairing packet type %u", evt.packet[1]);
-			break;
+		// Queue ACK payload on pipe 0 — tracker's next packet on pipe 0 will carry it back
+		esb_flush_tx();
+		int tx_err = esb_write_payload(&tx_payload_pair);
+		if (tx_err) {
+			LOG_WRN("Failed to queue new device pairing response: %d (will retry next cycle)", tx_err);
+		} else {
+			LOG_INF("New device pairing response queued: id=%u", tx_payload_pair.data[1]);
+			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 		}
 	}
-	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_CONNECTION);
-	esb_deinitialize();
 }
 
 void esb_reset_pair(void)
 {
-	esb_deinitialize(); // make sure esb is off
-	esb_paired = false;
+	// In unified mode, just enable pairing (no ESB reinit needed)
+	esb_start_pairing();
 }
 
 void esb_finish_pair(void)
 {
 	esb_pairing = false;
 	k_msgq_purge(&esb_pairing_msgq);
+	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_CONNECTION);
+	LOG_INF("Pairing mode disabled");
 }
 
 void esb_clear(void)
 {
 	esb_clearing = true;
 
+	// Disable pairing mode during clear
+	esb_pairing = false;
+	k_msgq_purge(&esb_pairing_msgq);
+
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	uint8_t previous_count = stored_trackers;
+	// Set count to 0 first — ISR immediately stops reading the array
 	stored_trackers = 0;
+	__asm__ volatile("" ::: "memory"); // compiler barrier
 	memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));
 	k_mutex_unlock(&tracker_store_lock);
 
-	sys_write(STORED_TRACKERS, NULL, &stored_trackers, sizeof(stored_trackers));
+	// Async NVS writes
+	uint8_t zero_count = 0;
+	nvs_write_async(STORED_TRACKERS, &zero_count, sizeof(zero_count));
 	for (uint8_t i = 0; i < previous_count && i < MAX_TRACKERS; i++) {
-		sys_write(STORED_ADDR_0 + i, NULL, &stored_tracker_addr[i], sizeof(stored_tracker_addr[0]));
+		uint64_t zero_addr = 0;
+		nvs_write_async(STORED_ADDR_0 + i, &zero_addr, sizeof(zero_addr));
 	}
 	LOG_INF("NVS Reset");
-
-	esb_reset_pair();
-
-	k_msleep(10);
 
 	// Reset packet sequence state for all trackers
 	for (int i = 0; i < MAX_TRACKERS; i++) {
@@ -1729,11 +1834,22 @@ void esb_write_sync(uint16_t led_clock)
 	esb_write_payload(&tx_payload_sync);
 }
 
-// TODO:
+// Set up unified addresses: pipe 0 for discovery (pairing), pipes 1-7 for paired data
 void esb_receive(void)
 {
-	esb_set_addr_paired();
+	esb_set_addr_unified();
 	esb_paired = true;
+}
+
+// NVS writer thread: processes async NVS write requests
+static void nvs_writer_thread(void)
+{
+	struct nvs_write_request req;
+	while (1) {
+		k_msgq_get(&nvs_write_msgq, &req, K_FOREVER);
+		k_msleep(5); // Simulate async write delay
+		sys_write(req.id, NULL, req.data, req.len);
+	}
 }
 
 static void esb_thread(void)
@@ -1770,18 +1886,33 @@ static void esb_thread(void)
 	}
 	LOG_INF("%d/%d devices stored", tracker_count, MAX_TRACKERS);
 
-	if (esb_paired) {
-		esb_receive();
-		esb_initialize(false);
-		esb_start_rx();
+	// Cache receiver device address for ISR pairing responses
+	uint64_t *dev_addr = (uint64_t *)NRF_FICR->DEVICEADDR;
+	memcpy(receiver_device_addr, dev_addr, 6);
+	LOG_INF("Receiver address: %012llX", *dev_addr & 0xFFFFFFFFFFFF);
+
+	// Pre-fill tx_payload_pair with receiver address (for thread-side pairing responses)
+	tx_payload_pair.pipe = 0;
+	tx_payload_pair.noack = false;
+	tx_payload_pair.length = 8;
+	memcpy(&tx_payload_pair.data[2], receiver_device_addr, 6);
+
+	// Always start in unified mode: pipe 0 for pairing, pipes 1-7 for data
+	esb_receive();
+	esb_initialize(false);
+	esb_start_rx();
+
+	// Auto-enable pairing mode if no stored trackers
+	if (tracker_count == 0) {
+		esb_pairing = true;
+		LOG_INF("No stored trackers, pairing mode auto-enabled");
+		set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 	}
 
 	while (1) {
-		if (!esb_paired && !esb_clearing) {
-			esb_pair();
-			esb_receive();
-			esb_initialize(false);
-			esb_start_rx();
+		// Process new device pairing requests (non-blocking)
+		if (esb_pairing) {
+			process_pairing_queue();
 		}
 
 		// Check if channel change is complete
@@ -1800,8 +1931,9 @@ static void esb_thread(void)
 					// Clear from NVS
 					sys_write(RF_CHANNEL, NULL, &receiver_rf_channel, sizeof(receiver_rf_channel));
 
-					// Reinitialize ESB with default channel
+					// Reinitialize ESB with default channel (unified addresses)
 					esb_deinitialize();
+					esb_set_addr_unified();
 					esb_initialize(false);
 					esb_start_rx();
 
@@ -1814,8 +1946,9 @@ static void esb_thread(void)
 					// Save to NVS
 					sys_write(RF_CHANNEL, NULL, &receiver_rf_channel, sizeof(receiver_rf_channel));
 
-					// Reinitialize ESB with new channel
+					// Reinitialize ESB with new channel (unified addresses)
 					esb_deinitialize();
+					esb_set_addr_unified();
 					esb_initialize(false);
 					esb_start_rx();
 
@@ -1838,3 +1971,4 @@ static void esb_thread(void)
 		k_msleep(100);
 	}
 }
+

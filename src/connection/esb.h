@@ -70,11 +70,11 @@ int esb_initialize(bool);
 
 void esb_set_addr_discovery(void);
 void esb_set_addr_paired(void);
+void esb_set_addr_unified(void);
 
 int esb_add_pair(uint64_t addr, bool checksum);
 void esb_pop_pair(void);
 
-void esb_pair(void);
 void esb_start_pairing(void);
 void esb_reset_pair(void);
 void esb_finish_pair(void);

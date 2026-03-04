@@ -403,7 +403,7 @@ static void console_thread(void)
 			skip_dfu();
 			sys_reboot(SYS_REBOOT_COLD);
 		} else if (memcmp(line, command_pair, sizeof(command_pair)) == 0) {
-			esb_reset_pair();
+			esb_start_pairing();
 		} else if (memcmp(line, command_exit, sizeof(command_exit)) == 0) {
 			esb_finish_pair();
 		} else if (memcmp(line, command_clear, sizeof(command_clear)) == 0) {
