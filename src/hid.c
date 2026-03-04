@@ -36,11 +36,14 @@ static struct tracker_report {
 	.data = {0}
 };;
 
-struct tracker_report reports[MAX_TRACKERS];
+
+#define MAX_REPORTS (MAX_TRACKERS * 4)
+
+struct tracker_report reports[MAX_REPORTS];
 atomic_t report_write_index = 0;
 atomic_t report_read_index = 0;
 // read_index == write_index -> empty fifo
-// (write_index + 1) % MAX_TRACKERS == read_index -> full fifo
+// (write_index + 1) % MAX_REPORTS == read_index -> full fifo
 
 static bool configured;
 static const struct device *hdev;
@@ -209,15 +212,15 @@ static void send_report(struct k_work *work)
 	if (!atomic_test_and_set_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG)) {
 		// Calculate how many reports we have available
 		int available_reports = write_idx - read_idx;
-		if (available_reports < 0) available_reports += MAX_TRACKERS;
-		size_t reports_to_send = (size_t)((available_reports > HID_EP_REPORT_COUNT) ? HID_EP_REPORT_COUNT : available_reports);
+		if (available_reports < 0) available_reports += MAX_REPORTS;
+		size_t reports_to_send = (size_t) MIN(available_reports, HID_EP_REPORT_COUNT);
 
 		int epind;
 		// Copy existing data to buffer
 		for (epind = 0; epind < reports_to_send; epind++) {
 			ep_report_buffer[epind] = reports[read_idx];
 			read_idx++;
-			if (read_idx == MAX_TRACKERS) {
+			if (read_idx == MAX_REPORTS) {
 				read_idx = 0;
 			}
 		}
@@ -465,7 +468,7 @@ void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 
 	// Calculate next write position
 	size_t next_write = write_idx + 1;
-	if (next_write == MAX_TRACKERS) next_write = 0;
+	if (next_write == MAX_REPORTS) next_write = 0;
 
 	// Check if FIFO is full
 	if (next_write == read_idx) {
