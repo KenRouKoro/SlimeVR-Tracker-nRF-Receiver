@@ -88,8 +88,8 @@ static uint8_t receiver_rf_channel = 0xFF; // Current RF channel of the receiver
 #define PING_TIMEOUT_MS 5000 // PING timeout threshold: 5 seconds
 
 // Channel change confirmation tracking
-static bool channel_change_pending = false; // Indicates if a channel change is pending
-static uint8_t pending_channel = 0;         // The channel value to switch to
+static atomic_t channel_change_pending = ATOMIC_INIT(0); // Indicates if a channel change is pending
+static uint8_t pending_channel = 0;                      // The channel value to switch to
 static atomic_t channel_ack_mask
 	= ATOMIC_INIT(0);                      // Bitmask to track which trackers have acknowledged the channel change
 static int64_t channel_change_timeout = 0; // Timestamp for channel change timeout
@@ -776,14 +776,17 @@ void event_handler(struct esb_evt const *event)
 
 							if ((ping_ack_flag == ESB_PONG_FLAG_SET_CHANNEL
 								 || ping_ack_flag == ESB_PONG_FLAG_CLEAR_CHANNEL)
-								&& channel_change_pending) {
-								atomic_or(&channel_ack_mask, (1 << tracker_id));
-								uint8_t current_mask = atomic_get(&channel_ack_mask);
+								&& atomic_get(&channel_change_pending)) {
+								// Use the return value (old mask) of atomic_or to compute
+								// the new mask locally, avoiding a separate atomic_get that
+								// could race with other trackers confirming concurrently.
+								atomic_val_t old_mask = atomic_or(&channel_ack_mask, (1 << tracker_id));
+								atomic_val_t new_mask = old_mask | (1 << tracker_id);
 								LOG_INF(
 									"Tracker %u confirmed channel change "
 									"(%u/%u confirmed)",
 									tracker_id,
-									__builtin_popcount(current_mask),
+									__builtin_popcount(new_mask),
 									stored_trackers
 								);
 							}
@@ -1633,16 +1636,18 @@ void esb_set_all_trackers_channel(uint8_t channel)
 		return;
 	}
 
-	if (channel_change_pending) {
+	if (atomic_get(&channel_change_pending)) {
 		LOG_WRN("Channel change already in progress, please wait");
 		return;
 	}
 
 	tracker_channel_value = channel;
 	pending_channel = channel;
-	channel_change_pending = true;
-	atomic_set(&channel_ack_mask, 0);
 	channel_change_timeout = k_uptime_get() + CHANNEL_CHANGE_TIMEOUT_MS;
+	// Clear mask before setting the pending flag to avoid losing confirmations
+	// that arrive between the flag set and the mask clear.
+	atomic_set(&channel_ack_mask, 0);
+	atomic_set(&channel_change_pending, 1);
 
 	esb_send_remote_command_all(ESB_PONG_FLAG_SET_CHANNEL);
 	LOG_INF("RF channel %u command sent to all trackers, waiting for confirmation...", channel);
@@ -1651,15 +1656,17 @@ void esb_set_all_trackers_channel(uint8_t channel)
 // Clear RF channel settings for all trackers (restore to default)
 void esb_clear_all_trackers_channel(void)
 {
-	if (channel_change_pending) {
+	if (atomic_get(&channel_change_pending)) {
 		LOG_WRN("Channel change already in progress, please wait");
 		return;
 	}
 
 	pending_channel = 0xFF; // Special value to indicate clearing
-	channel_change_pending = true;
-	atomic_set(&channel_ack_mask, 0);
 	channel_change_timeout = k_uptime_get() + CHANNEL_CHANGE_TIMEOUT_MS;
+	// Clear mask before setting the pending flag to avoid losing confirmations
+	// that arrive between the flag set and the mask clear.
+	atomic_set(&channel_ack_mask, 0);
+	atomic_set(&channel_change_pending, 1);
 
 	esb_send_remote_command_all(ESB_PONG_FLAG_CLEAR_CHANNEL);
 	LOG_INF("CLEAR_CHANNEL command sent to all trackers, waiting for confirmation...");
@@ -1778,9 +1785,9 @@ static void esb_thread(void)
 		}
 
 		// Check if channel change is complete
-		if (channel_change_pending) {
-			uint8_t expected_mask = (1 << stored_trackers) - 1;
-			uint8_t current_mask = atomic_get(&channel_ack_mask);
+		if (atomic_get(&channel_change_pending)) {
+			uint32_t expected_mask = (stored_trackers < 32) ? ((1U << stored_trackers) - 1U) : 0xFFFFFFFFU;
+			uint32_t current_mask = (uint32_t)atomic_get(&channel_ack_mask);
 			int64_t now = k_uptime_get();
 
 			if (current_mask == expected_mask) {
@@ -1815,7 +1822,7 @@ static void esb_thread(void)
 					LOG_INF("Receiver channel switched to %u successfully", receiver_rf_channel);
 				}
 
-				channel_change_pending = false;
+				atomic_set(&channel_change_pending, 0);
 			} else if (now >= channel_change_timeout) {
 				// Timeout, cancel channel change
 				LOG_WRN(
@@ -1823,7 +1830,7 @@ static void esb_thread(void)
 					__builtin_popcount(current_mask),
 					stored_trackers
 				);
-				channel_change_pending = false;
+				atomic_set(&channel_change_pending, 0);
 				tracker_channel_value = 0; // Reset pending channel value
 			}
 		}
