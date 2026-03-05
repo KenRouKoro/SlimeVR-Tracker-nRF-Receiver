@@ -76,6 +76,7 @@ int esb_add_pair(uint64_t addr, bool checksum);
 void esb_pop_pair(void);
 
 void esb_start_pairing(void);
+void esb_start_pairing_with_count(uint8_t target_count);
 void esb_reset_pair(void);
 void esb_finish_pair(void);
 void esb_clear(void);

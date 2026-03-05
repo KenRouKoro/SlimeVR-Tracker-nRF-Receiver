@@ -33,6 +33,7 @@
 
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
+#define PAIRING_TIMEOUT_SECONDS CONFIG_PAIRING_TIMEOUT
 
 // TDMA parameters (copied from Tracker)
 #define TDMA_ENABLED 0
@@ -99,6 +100,14 @@ static int64_t channel_change_timeout = 0; // Timestamp for channel change timeo
 static bool esb_pairing = false;
 static bool esb_paired = false;
 static bool esb_clearing = false;
+
+// Pairing timeout and target count
+static int64_t pairing_start_time = 0;
+static uint8_t pairing_target_count = 0; // 0 = no limit, >0 = exit after N new devices
+static uint8_t pairing_initial_count = 0; // Number of devices when pairing started
+static int64_t pairing_target_reached_time = 0; // Time when target count was reached (for delayed exit)
+static volatile bool pairing_new_devices_blocked = false; // When true, only allow re-pairing of known devices
+#define PAIRING_EXIT_DELAY_MS 15000 // Delay before exiting after target count reached
 
 // Cached receiver device address (set once at init, used by ISR for pairing responses)
 static uint8_t receiver_device_addr[6] = {0};
@@ -522,6 +531,12 @@ void event_handler(struct esb_evt const *event)
 						} else {
 							LOG_INF("Pairing request from unknown %012llX, pairing mode inactive", found_addr);
 						}
+						break;
+					}
+
+					// Check if new devices are blocked (target count reached, waiting for exit delay)
+					if (pairing_new_devices_blocked && known_id < 0) {
+						LOG_INF("Pairing request from unknown %012llX rejected (target count reached)", found_addr);
 						break;
 					}
 
@@ -1390,6 +1405,20 @@ void esb_start_pairing(void)
 {
 	LOG_INF("Pairing mode enabled (unified)");
 	esb_pairing = true;
+	pairing_start_time = k_uptime_get();
+	pairing_target_count = 0; // No limit
+	pairing_initial_count = stored_trackers;
+	k_msgq_purge(&esb_pairing_msgq);
+	set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
+}
+
+void esb_start_pairing_with_count(uint8_t target_count)
+{
+	LOG_INF("Pairing mode enabled (unified), target count: %u", target_count);
+	esb_pairing = true;
+	pairing_start_time = k_uptime_get();
+	pairing_target_count = target_count;
+	pairing_initial_count = stored_trackers;
 	k_msgq_purge(&esb_pairing_msgq);
 	set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 }
@@ -1430,6 +1459,11 @@ void esb_reset_pair(void)
 void esb_finish_pair(void)
 {
 	esb_pairing = false;
+	pairing_start_time = 0;
+	pairing_target_count = 0;
+	pairing_initial_count = 0;
+	pairing_target_reached_time = 0;
+	pairing_new_devices_blocked = false;
 	k_msgq_purge(&esb_pairing_msgq);
 	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_CONNECTION);
 	LOG_INF("Pairing mode disabled");
@@ -1905,6 +1939,9 @@ static void esb_thread(void)
 	// Auto-enable pairing mode if no stored trackers
 	if (tracker_count == 0) {
 		esb_pairing = true;
+		pairing_start_time = k_uptime_get();
+		pairing_target_count = 0;
+		pairing_initial_count = 0;
 		LOG_INF("No stored trackers, pairing mode auto-enabled");
 		set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 	}
@@ -1913,6 +1950,34 @@ static void esb_thread(void)
 		// Process new device pairing requests (non-blocking)
 		if (esb_pairing) {
 			process_pairing_queue();
+
+			// Check for pairing timeout
+			if (PAIRING_TIMEOUT_SECONDS > 0 && pairing_start_time > 0) {
+				int64_t elapsed = k_uptime_get() - pairing_start_time;
+				if (elapsed >= (PAIRING_TIMEOUT_SECONDS * 1000)) {
+					LOG_INF("Pairing mode timeout (%d seconds), auto-exiting", PAIRING_TIMEOUT_SECONDS);
+					esb_finish_pair();
+				}
+			}
+
+			// Check for target count reached
+			if (pairing_target_count > 0) {
+				uint8_t new_devices = stored_trackers - pairing_initial_count;
+				if (new_devices >= pairing_target_count) {
+					// Mark when target was reached (only once)
+					if (pairing_target_reached_time == 0) {
+						pairing_target_reached_time = k_uptime_get();
+						pairing_new_devices_blocked = true; // Block new devices, allow re-pairing only
+						LOG_INF("Pairing target count reached (%u new devices), exiting in %d seconds...",
+							new_devices, PAIRING_EXIT_DELAY_MS / 1000);
+					}
+					// Check if delay has passed
+					int64_t elapsed_since_target = k_uptime_get() - pairing_target_reached_time;
+					if (elapsed_since_target >= PAIRING_EXIT_DELAY_MS) {
+						esb_finish_pair();
+					}
+				}
+			}
 		}
 
 		// Check if channel change is complete

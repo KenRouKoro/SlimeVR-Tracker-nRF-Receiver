@@ -142,10 +142,13 @@ static void print_help(void)
 		"  reboot                     Soft reset the device\n"
 		"  add <address>              Manually add a device\n"
 		"  remove                     Remove last device\n"
-		"  pair                       Enter pairing mode\n"
+		"  pair [count]               Enter pairing mode\n"
+		"    pair                     Pair indefinitely (timeout after %d seconds)\n"
+		"    pair 4                   Exit after pairing 4 new devices\n"
 		"  exit                       Exit pairing mode\n"
 		"  clear                      Clear stored devices\n"
-		"\n"
+		"\n",
+		CONFIG_PAIRING_TIMEOUT
 	);
 
 	printk(
@@ -403,7 +406,27 @@ static void console_thread(void)
 			skip_dfu();
 			sys_reboot(SYS_REBOOT_COLD);
 		} else if (memcmp(line, command_pair, sizeof(command_pair)) == 0) {
-			esb_start_pairing();
+			if (!arg) {
+				// No argument: traditional pairing mode with timeout
+				esb_start_pairing();
+				printk("Pairing mode enabled (auto-exit after %d seconds)\n", CONFIG_PAIRING_TIMEOUT);
+			} else {
+				// Parse target count
+				char *endptr;
+				long count = strtol(arg, &endptr, 10);
+				if (*endptr != '\0' || count < 0 || count > 255) {
+					printk("Invalid count. Usage: pair [count]\n");
+					printk("  pair       - Pair indefinitely (timeout after %d seconds)\n", CONFIG_PAIRING_TIMEOUT);
+					printk("  pair 4     - Exit after pairing 4 new devices\n");
+				} else if (count == 0) {
+					// pair 0 = same as no argument
+					esb_start_pairing();
+					printk("Pairing mode enabled (auto-exit after %d seconds)\n", CONFIG_PAIRING_TIMEOUT);
+				} else {
+					esb_start_pairing_with_count((uint8_t)count);
+					printk("Pairing mode enabled (auto-exit after %u new devices or %d seconds)\n", (uint8_t)count, CONFIG_PAIRING_TIMEOUT);
+				}
+			}
 		} else if (memcmp(line, command_exit, sizeof(command_exit)) == 0) {
 			esb_finish_pair();
 		} else if (memcmp(line, command_clear, sizeof(command_clear)) == 0) {
