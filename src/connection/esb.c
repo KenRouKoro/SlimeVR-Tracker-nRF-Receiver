@@ -81,9 +81,11 @@ static bool ping_counter_initialized[MAX_TRACKERS]
 static uint64_t last_ping_time[MAX_TRACKERS] = {0}; // Track the last time a PING was received from each tracker
 static uint8_t last_pong_queued_counter[MAX_TRACKERS] = {0}; // Track the last PONG counter enqueued for each tracker
 static uint8_t packet_count[MAX_TRACKERS] = {0};             // Packet count received from each tracker
-static uint8_t tracker_remote_command[MAX_TRACKERS] = {ESB_PONG_FLAG_NORMAL}; // Tracker remote command flag
-static uint32_t tracker_channel_value = 0;               // Channel value to be set (for SET_CHANNEL command)
-static int16_t pending_sens_data[MAX_TRACKERS][3] = {0}; // Store pending sensitivity data
+// Shared ACK state: written by threads/event_handler, read by ack_handler (radio ISR).
+// On single-core Cortex-M, volatile ensures visibility between ISR priorities.
+static volatile uint8_t tracker_remote_command[MAX_TRACKERS]; // Command flag for next PONG
+static volatile uint32_t tracker_channel_value;               // Channel value for SET_CHANNEL command
+static volatile int16_t pending_sens_data[MAX_TRACKERS][3];   // SENS_SET sensitivity data
 static uint8_t receiver_rf_channel = 0xFF; // Current RF channel of the receiver, 0xFF indicates using default value
 
 #define PING_TIMEOUT_MS 5000 // PING timeout threshold: 5 seconds
@@ -111,6 +113,10 @@ static volatile bool pairing_new_devices_blocked = false; // When true, only all
 
 // Cached receiver device address (set once at init, used by ISR for pairing responses)
 static uint8_t receiver_device_addr[6] = {0};
+
+// TX recovery work item (esb_flush cannot be called with k_msleep from ISR/SWI context)
+static void tx_recovery_work_handler(struct k_work *work);
+static K_WORK_DEFINE(tx_recovery_work, tx_recovery_work_handler);
 
 // NVS async write infrastructure
 struct nvs_write_request {
@@ -166,6 +172,13 @@ static void esb_stats_thread(void);
 K_THREAD_DEFINE(esb_stats_thread_id, 512, esb_stats_thread, NULL, NULL, NULL, 8, 0, 0);
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
+
+static void tx_recovery_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	esb_flush_tx();
+	LOG_ERR("TX recovery: flushed TX FIFO from work queue");
+}
 
 static void esb_thread(void);
 K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 7, 0, 0);
@@ -439,6 +452,123 @@ static void esb_stats_thread(void)
 	}
 }
 
+/* ---------------------------------------------------------------------------
+ * ACK handler — runs in radio ISR context (~130 µs budget).
+ * Builds the ACK payload for the *current* packet so the response is
+ * returned in the same transaction rather than the next one.
+ *
+ * Only reads pre-computed volatile state written by event_handler / threads.
+ * No blocking, no logging, no locks.
+ * -------------------------------------------------------------------------*/
+static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
+				uint32_t pipe_id, struct esb_payload *ack_payload,
+				bool *has_ack_payload)
+{
+	/* ---- PING → PONG (immediate response) ---- */
+	if (data_length == ESB_PING_LEN && pdu_data[0] == ESB_PING_TYPE) {
+		uint8_t tracker_id = pdu_data[1];
+		if (tracker_id >= MAX_TRACKERS) {
+			return;
+		}
+
+		uint8_t crc = crc8_ccitt(0x07, pdu_data, ESB_PING_LEN - 1);
+		if (pdu_data[ESB_PING_LEN - 1] != crc) {
+			return;
+		}
+
+		uint32_t rx_ticks = k_uptime_ticks();
+		uint8_t counter = pdu_data[2];
+		uint8_t cmd = tracker_remote_command[tracker_id];
+
+		ack_payload->pipe = 1 + (tracker_id % 7);
+		ack_payload->length = ESB_PONG_LEN;
+		ack_payload->noack = false;
+
+		ack_payload->data[0] = ESB_PONG_TYPE;
+		ack_payload->data[1] = tracker_id;
+		ack_payload->data[2] = counter;
+		ack_payload->data[7] = cmd;
+
+		if (cmd == ESB_PONG_FLAG_SENS_SET) {
+			/* SENS_SET overrides time sync bytes with sensitivity data */
+			int16_t s0 = pending_sens_data[tracker_id][0];
+			int16_t s1 = pending_sens_data[tracker_id][1];
+			int16_t s2 = pending_sens_data[tracker_id][2];
+			ack_payload->data[3] = (s0 >> 8) & 0xFF;
+			ack_payload->data[4] = (s0) & 0xFF;
+			ack_payload->data[5] = (s1 >> 8) & 0xFF;
+			ack_payload->data[6] = (s1) & 0xFF;
+			ack_payload->data[8] = (s2 >> 8) & 0xFF;
+			ack_payload->data[9] = (s2) & 0xFF;
+			ack_payload->data[10] = 0;
+			ack_payload->data[11] = 0;
+		} else {
+			/* Normal: embed receiver timestamp for time sync */
+			ack_payload->data[3] = (rx_ticks >> 24) & 0xFF;
+			ack_payload->data[4] = (rx_ticks >> 16) & 0xFF;
+			ack_payload->data[5] = (rx_ticks >> 8) & 0xFF;
+			ack_payload->data[6] = (rx_ticks) & 0xFF;
+
+			if (cmd == ESB_PONG_FLAG_SET_CHANNEL) {
+				uint32_t ch = tracker_channel_value;
+				ack_payload->data[8] = (ch >> 24) & 0xFF;
+				ack_payload->data[9] = (ch >> 16) & 0xFF;
+				ack_payload->data[10] = (ch >> 8) & 0xFF;
+				ack_payload->data[11] = (ch) & 0xFF;
+			} else if (cmd == ESB_PONG_FLAG_NORMAL) {
+				/* ticks_diff for clock skew compensation */
+				uint32_t est = ((uint32_t)pdu_data[3] << 24)
+					     | ((uint32_t)pdu_data[4] << 16)
+					     | ((uint32_t)pdu_data[5] << 8)
+					     | ((uint32_t)pdu_data[6]);
+				int32_t diff = (int32_t)(rx_ticks - est);
+				ack_payload->data[8] = (diff >> 24) & 0xFF;
+				ack_payload->data[9] = (diff >> 16) & 0xFF;
+				ack_payload->data[10] = (diff >> 8) & 0xFF;
+				ack_payload->data[11] = (diff) & 0xFF;
+			} else {
+				memset(&ack_payload->data[8], 0, 4);
+			}
+		}
+
+		ack_payload->data[ESB_PONG_LEN - 1] =
+			crc8_ccitt(0x07, ack_payload->data, ESB_PONG_LEN - 1);
+		*has_ack_payload = true;
+		return;
+	}
+
+	/* ---- Pairing response (on step 1, when tracker expects ACK) ---- */
+	if (data_length == 8 && pdu_data[1] == 1) {
+		uint64_t raw_addr = 0;
+
+		memcpy(&raw_addr, pdu_data, sizeof(raw_addr));
+		uint64_t found_addr = (raw_addr >> 16) & 0xFFFFFFFFFFFFULL;
+		uint8_t checksum = crc8_ccitt(0x07, &pdu_data[2], 6);
+		if (checksum == 0) {
+			checksum = 8;
+		}
+		if (checksum != pdu_data[0] || found_addr == 0) {
+			return;
+		}
+
+		int known_id = esb_find_tracker(found_addr);
+		if (known_id < 0 || !esb_pairing) {
+			return;
+		}
+
+		ack_payload->pipe = pipe_id;
+		ack_payload->length = 8;
+		ack_payload->noack = false;
+		ack_payload->data[0] = checksum;
+		ack_payload->data[1] = (uint8_t)known_id;
+		memcpy(&ack_payload->data[2], receiver_device_addr, 6);
+		*has_ack_payload = true;
+		return;
+	}
+
+	/* Other packet types: no ACK payload, handled by event_handler */
+}
+
 void event_handler(struct esb_evt const *event)
 {
 	int64_t now = k_uptime_get();
@@ -478,8 +608,7 @@ void event_handler(struct esb_evt const *event)
 			// Recovery mechanism
 			if (tx_statistics.consecutive_fails >= 50) {
 				LOG_ERR("Too many TX failures, attempting ESB recovery...");
-				esb_flush_tx();
-				k_msleep(10);
+				k_work_submit(&tx_recovery_work);
 				tx_statistics.consecutive_fails = 0; // Reset to avoid spam
 			}
 		}
@@ -541,23 +670,8 @@ void event_handler(struct esb_evt const *event)
 					}
 
 					if (known_id >= 0) {
-						// Known device + pairing mode: respond immediately from ISR (no lock, no NVS)
-						struct esb_payload response = {
-							.pipe = 0,
-							.noack = false,
-							.length = 8,
-						};
-						response.data[0] = checksum;
-						response.data[1] = (uint8_t)known_id;
-						memcpy(&response.data[2], receiver_device_addr, 6);
-
-						esb_flush_tx();
-						int werr = esb_write_payload(&response);
-						if (werr) {
-							LOG_WRN("Failed to queue re-pair response for tracker %d: %d", known_id, werr);
-						} else {
-							LOG_INF("Re-pair response queued for known tracker %d", known_id);
-						}
+						// Known device: ack_handler will respond on step 1.
+						LOG_INF("Known tracker %d re-pairing (ack_handler responds on step 1)", known_id);
 					} else {
 						// Unknown device + pairing mode: queue for thread processing
 						struct pairing_event evt = {0};
@@ -907,64 +1021,9 @@ void event_handler(struct esb_evt const *event)
 						}
 					}
 
-					struct esb_payload pong = {.noack = false, .pipe = 1 + (tracker_id % 7), .length = ESB_PONG_LEN};
-
-					pong.data[0] = ESB_PONG_TYPE;
-					pong.data[1] = tracker_id;
-					pong.data[2] = counter;
-					pong.data[3] = (current_rx_ticks >> 24) & 0xFF;
-					pong.data[4] = (current_rx_ticks >> 16) & 0xFF;
-					pong.data[5] = (current_rx_ticks >> 8) & 0xFF;
-					pong.data[6] = (current_rx_ticks) & 0xFF;
-					pong.data[7] = tracker_remote_command[tracker_id];
-
-					// Fill data[8-11] based on command type
-					if (tracker_remote_command[tracker_id] == ESB_PONG_FLAG_SET_CHANNEL) {
-						// For SET_CHANNEL, use the channel value
-						pong.data[8] = (tracker_channel_value >> 24) & 0xFF;
-						pong.data[9] = (tracker_channel_value >> 16) & 0xFF;
-						pong.data[10] = (tracker_channel_value >> 8) & 0xFF;
-						pong.data[11] = (tracker_channel_value) & 0xFF;
-					} else if (tracker_remote_command[tracker_id] == ESB_PONG_FLAG_SENS_SET) {
-						// For SENS_SET, use compressed sensitivity data
-						// Overwrite time sync bytes (3-6) and use bytes 8-9
-						pong.data[3] = (pending_sens_data[tracker_id][0] >> 8) & 0xFF;
-						pong.data[4] = (pending_sens_data[tracker_id][0]) & 0xFF;
-						pong.data[5] = (pending_sens_data[tracker_id][1] >> 8) & 0xFF;
-						pong.data[6] = (pending_sens_data[tracker_id][1]) & 0xFF;
-
-						pong.data[8] = (pending_sens_data[tracker_id][2] >> 8) & 0xFF;
-						pong.data[9] = (pending_sens_data[tracker_id][2]) & 0xFF;
-						pong.data[10] = 0; // Unused
-						pong.data[11] = 0; // Unused
-					} else if (tracker_remote_command[tracker_id] == ESB_PONG_FLAG_NORMAL) {
-						// Send ticks_diff for clock skew compensation
-						pong.data[8] = (ticks_diff >> 24) & 0xFF;
-						pong.data[9] = (ticks_diff >> 16) & 0xFF;
-						pong.data[10] = (ticks_diff >> 8) & 0xFF;
-						pong.data[11] = (ticks_diff) & 0xFF;
-					} else {
-						// For other commands, currently unused
-						memset(&pong.data[8], 0x00, 4); // reserved
-					}
-
-					// Try to write ACK payload with robust error handling
-					pong.data[ESB_PONG_LEN - 1] = crc8_ccitt(0x07, pong.data, ESB_PONG_LEN - 1);
-					esb_flush_tx();
-					int werr = esb_write_payload(&pong);
-
-					if (werr == 0) {
-						// Success - mark this counter as queued
-						last_pong_queued_counter[tracker_id] = counter;
-						LOG_DBG(
-							"ACK payload queued: PONG id=%u ctr=%u pipe=%u "
-							"cmd=0x%02X",
-							tracker_id,
-							counter,
-							pong.pipe,
-							tracker_remote_command[tracker_id]
-						);
-					}
+					/* PONG is now built by ack_handler in radio ISR context.
+					 * event_handler only needs to track sequence state. */
+					last_pong_queued_counter[tracker_id] = counter;
 				}
 			} break;
 			case 17: // 16 bytes data + 1 byte sequence number
@@ -1137,6 +1196,7 @@ int esb_initialize(bool tx)
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
 		config.mode = ESB_MODE_PRX;
 		config.event_handler = event_handler;
+		config.ack_handler = esb_ack_handler_cb;
 		// config.bitrate = ESB_BITRATE_2MBPS;
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
@@ -1438,15 +1498,11 @@ static void process_pairing_queue(void)
 			continue;
 		}
 
-		// Queue ACK payload on pipe 0 — tracker's next packet on pipe 0 will carry it back
-		esb_flush_tx();
-		int tx_err = esb_write_payload(&tx_payload_pair);
-		if (tx_err) {
-			LOG_WRN("Failed to queue new device pairing response: %d (will retry next cycle)", tx_err);
-		} else {
-			LOG_INF("New device pairing response queued: id=%u", tx_payload_pair.data[1]);
-			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
-		}
+		// Device is now registered — ack_handler will respond on the
+		// next pairing step 1 via esb_find_tracker() lookup.
+		LOG_INF("New device registered: id=%u, ack_handler will respond on next step 1",
+			tx_payload_pair.data[1]);
+		set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 	}
 }
 
