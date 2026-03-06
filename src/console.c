@@ -153,7 +153,8 @@ static void print_help(void)
 
 	printk(
 		"Statistics:\n"
-		"  stats                      Show packet statistics\n"
+		"  stats                      Toggle detailed packet statistics\n"
+		"  stats <seconds>            Show detailed stats for N seconds\n"
 		"  resetstats                 Reset packet statistics\n"
 		"\n"
 	);
@@ -432,7 +433,35 @@ static void console_thread(void)
 		} else if (memcmp(line, command_clear, sizeof(command_clear)) == 0) {
 			esb_clear();
 		} else if (memcmp(line, command_stats, sizeof(command_stats)) == 0) {
-			esb_print_all_stats();
+			if (!arg) {
+				// No argument: toggle detailed stats
+				bool enabled = esb_toggle_stats_detailed();
+				if (enabled) {
+					printk("Detailed stats enabled (toggle again to disable)\n");
+				} else {
+					printk("Detailed stats disabled\n");
+				}
+			} else {
+				// Parse duration
+				char *endptr;
+				long duration = strtol(arg, &endptr, 10);
+				if (*endptr != '\0' || duration < 0 || duration > 86400) {
+					printk("Invalid duration. Usage: stats [seconds]\n");
+					printk("  stats       - Toggle detailed stats on/off\n");
+					printk("  stats 30    - Show detailed stats for 30 seconds\n");
+				} else if (duration == 0) {
+					// stats 0 = toggle off
+					esb_set_stats_detailed(0);
+					if (esb_get_stats_detailed_enabled()) {
+						printk("Detailed stats disabled\n");
+					} else {
+						printk("Detailed stats enabled (toggle again to disable)\n");
+					}
+				} else {
+					esb_set_stats_detailed((uint32_t)duration);
+					printk("Detailed stats enabled for %ld seconds\n", duration);
+				}
+			}
 		} else if (memcmp(line, command_resetstats, sizeof(command_resetstats)) == 0) {
 			esb_reset_all_stats();
 		} else if (memcmp(line, command_channel, sizeof(command_channel)) == 0) {

@@ -51,20 +51,6 @@ static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0, 0,
 // 0, 0, 0, 0, 0, 0, 0);
 static struct esb_payload tx_payload_sync = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0);
 
-// TX statistics
-struct tx_stats {
-	uint32_t total_success;          // Total successful transmissions
-	uint32_t total_failed;           // Total failed transmissions
-	uint32_t consecutive_fails;      // Consecutive failed transmissions
-	int64_t last_fail_time;          // Last failure timestamp
-	int64_t last_log_time;           // Last log timestamp
-	uint32_t success_since_last_log; // Successful transmissions since last log
-	uint32_t failed_since_last_log;  // Failed transmissions since last log
-};
-static struct tx_stats tx_statistics = {0};
-
-#define TX_LOG_INTERVAL_MS 1000 // TX statistics log interval (max once per second)
-
 struct pairing_event {
 	uint8_t packet[8];
 };
@@ -114,10 +100,6 @@ static volatile bool pairing_new_devices_blocked = false; // When true, only all
 // Cached receiver device address (set once at init, used by ISR for pairing responses)
 static uint8_t receiver_device_addr[6] = {0};
 
-// TX recovery work item (esb_flush cannot be called with k_msleep from ISR/SWI context)
-static void tx_recovery_work_handler(struct k_work *work);
-static K_WORK_DEFINE(tx_recovery_work, tx_recovery_work_handler);
-
 // NVS async write infrastructure
 struct nvs_write_request {
 	uint16_t id;
@@ -151,9 +133,14 @@ struct packet_stats {
 };
 
 static struct packet_stats tracker_stats[MAX_TRACKERS] = {0};
-#define STATS_PRINT_INTERVAL_MS 5000     // Print statistics every 5 seconds
+#define STATS_PRINT_INTERVAL_MS 1000     // Print detailed statistics every 1 second (when enabled)
 #define TPS_CALCULATION_INTERVAL_MS 1000 // Calculate TPS every second
 #define TPS_MONITOR_INTERVAL_MS 500
+
+// Statistics display control
+static volatile bool stats_detailed_enabled = false;        // Whether detailed stats are enabled
+static volatile int64_t stats_detailed_end_time = 0;        // Timestamp when detailed stats should auto-disable (0 = no auto-disable)
+static int64_t last_tps_print_time = 0;                     // Last time total TPS was printed
 
 // TDMA Statistics
 struct tdma_stats {
@@ -172,13 +159,6 @@ static void esb_stats_thread(void);
 K_THREAD_DEFINE(esb_stats_thread_id, 512, esb_stats_thread, NULL, NULL, NULL, 8, 0, 0);
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
-
-static void tx_recovery_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	esb_flush_tx();
-	LOG_ERR("TX recovery: flushed TX FIFO from work queue");
-}
 
 static void esb_thread(void);
 K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 7, 0, 0);
@@ -412,12 +392,14 @@ static void print_tracker_stats_batch(void)
 
 static void esb_stats_thread(void)
 {
-	int64_t last_log_time = k_uptime_get();
+	last_tps_print_time = k_uptime_get();
 
 	while (1) {
 		k_msleep(TPS_MONITOR_INTERVAL_MS);
 
 		uint64_t now = (uint64_t)k_uptime_get();
+
+		// Update TPS for each tracker
 		for (int i = 0; i < MAX_TRACKERS; i++) {
 			struct packet_stats *stats = &tracker_stats[i];
 			if (stats->last_tps_time == 0) {
@@ -434,20 +416,47 @@ static void esb_stats_thread(void)
 			}
 		}
 
-		if (now - last_log_time >= STATS_PRINT_INTERVAL_MS) {
-			bool has_data = false;
+		// Check if detailed stats should be auto-disabled
+		if (stats_detailed_enabled && stats_detailed_end_time > 0) {
+			if (now >= stats_detailed_end_time) {
+				stats_detailed_enabled = false;
+				stats_detailed_end_time = 0;
+				LOG_INF("Detailed stats auto-disabled");
+			}
+		}
+
+		// Print total TPS every second (always)
+		if (now - last_tps_print_time >= TPS_CALCULATION_INTERVAL_MS) {
+			uint32_t total_tps = 0;
 			for (int i = 0; i < MAX_TRACKERS; i++) {
-				if (tracker_stats[i].total_received > 0) {
-					has_data = true;
-					break;
-				}
+				total_tps += tracker_stats[i].current_tps;
+			}
+			LOG_INF("Total TPS: %u", total_tps);
+			last_tps_print_time = now;
+		}
+
+		// Print detailed stats only when enabled
+		if (stats_detailed_enabled) {
+			static int64_t last_detailed_log_time = 0;
+			if (last_detailed_log_time == 0) {
+				last_detailed_log_time = now;
 			}
 
-			if (has_data) {
-				LOG_INF("=== Packet Statistics ===");
-				print_tracker_stats_batch();
+			if (now - last_detailed_log_time >= STATS_PRINT_INTERVAL_MS) {
+				bool has_data = false;
+				for (int i = 0; i < MAX_TRACKERS; i++) {
+					if (tracker_stats[i].total_received > 0) {
+						has_data = true;
+						break;
+					}
+				}
+
+				if (has_data) {
+					LOG_INF("=== Packet Statistics ===");
+					print_tracker_stats_batch();
+				}
+				last_detailed_log_time = now;
 			}
-			last_log_time = now;
 		}
 	}
 }
@@ -571,47 +580,14 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 
 void event_handler(struct esb_evt const *event)
 {
-	int64_t now = k_uptime_get();
-
 	switch (event->evt_id) {
 	case ESB_EVENT_TX_SUCCESS:
-		tx_statistics.total_success++;
-		tx_statistics.success_since_last_log++;
-		tx_statistics.consecutive_fails = 0; // Reset consecutive fail counter
-
+		// TX success - no action needed
 		break;
 
 	case ESB_EVENT_TX_FAILED:
-		tx_statistics.total_failed++;
-		tx_statistics.failed_since_last_log++;
-		tx_statistics.consecutive_fails++;
-		tx_statistics.last_fail_time = now;
-		// Only output detailed logs when there are many consecutive failures
-		if (tx_statistics.consecutive_fails <= 3) {
-			// Low frequency failures - DEBUG level
-			LOG_DBG("TX FAILED (attempts=%u, consecutive=%u)", event->tx_attempts, tx_statistics.consecutive_fails);
-		} else if (tx_statistics.consecutive_fails <= 10) {
-			// Medium frequency failures - log every 5 times
-			if (tx_statistics.consecutive_fails % 5 == 0) {
-				LOG_WRN(
-					"TX FAILED repeatedly! (consecutive=%u, attempts=%u)",
-					tx_statistics.consecutive_fails,
-					event->tx_attempts
-				);
-			}
-		} else {
-			// High frequency failures - log every 10 times
-			if (tx_statistics.consecutive_fails % 10 == 0) {
-				LOG_ERR("TX CRITICAL: %u consecutive failures! Check RF environment", tx_statistics.consecutive_fails);
-			}
-
-			// Recovery mechanism
-			if (tx_statistics.consecutive_fails >= 50) {
-				LOG_ERR("Too many TX failures, attempting ESB recovery...");
-				k_work_submit(&tx_recovery_work);
-				tx_statistics.consecutive_fails = 0; // Reset to avoid spam
-			}
-		}
+		// TX failed - log at debug level
+		LOG_DBG("TX FAILED (attempts=%u)", event->tx_attempts);
 		break;
 	case ESB_EVENT_RX_RECEIVED: {
 		int err = 0;
@@ -723,7 +699,9 @@ void event_handler(struct esb_evt const *event)
 					int32_t rx_time_diff_ticks = (int32_t)(current_rx_ticks - expected_rx_ticks);
 					uint64_t rx_time_diff_us
 						= k_ticks_to_us_floor64((rx_time_diff_ticks < 0 ? -rx_time_diff_ticks : rx_time_diff_ticks));
-
+#if !TDMA_ENABLED
+					ARG_UNUSED(rx_time_diff_us);
+#endif
 					// Log periodically
 					int64_t now_ms = k_uptime_get();
 					if (stats->count > 0) {
@@ -1819,8 +1797,48 @@ void esb_reset_all_stats(void)
 		last_ping_counter[i] = 0;
 		last_pong_queued_counter[i] = 0;
 	}
-	memset(&tx_statistics, 0, sizeof(struct tx_stats));
-	LOG_INF("All packet statistics, ACK statistics, and TX statistics have been reset");
+	LOG_INF("All packet statistics have been reset");
+}
+
+// Toggle detailed statistics display on/off
+bool esb_toggle_stats_detailed(void)
+{
+	stats_detailed_enabled = !stats_detailed_enabled;
+	stats_detailed_end_time = 0; // No auto-disable when toggling manually
+	return stats_detailed_enabled;
+}
+
+// Enable detailed statistics display for a specified duration (0 = toggle on/off permanently)
+void esb_set_stats_detailed(uint32_t duration_seconds)
+{
+	if (duration_seconds == 0) {
+		// Toggle mode
+		stats_detailed_enabled = !stats_detailed_enabled;
+		stats_detailed_end_time = 0;
+	} else {
+		// Timed mode
+		stats_detailed_enabled = true;
+		stats_detailed_end_time = k_uptime_get() + (int64_t)duration_seconds * 1000;
+	}
+}
+
+// Get current detailed stats status
+bool esb_get_stats_detailed_enabled(void)
+{
+	return stats_detailed_enabled;
+}
+
+// Get remaining time for detailed stats (0 if disabled or no auto-disable)
+uint32_t esb_get_stats_detailed_remaining(void)
+{
+	if (!stats_detailed_enabled || stats_detailed_end_time == 0) {
+		return 0;
+	}
+	int64_t remaining = stats_detailed_end_time - k_uptime_get();
+	if (remaining <= 0) {
+		return 0;
+	}
+	return (uint32_t)(remaining / 1000);
 }
 
 // Sets the RF channel for all trackers

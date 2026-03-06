@@ -86,6 +86,12 @@ void esb_reset_all_stats(void);
 void esb_write_sync(uint16_t led_clock);
 void esb_receive(void);
 
+// Statistics display control
+bool esb_toggle_stats_detailed(void);           // Toggle detailed stats on/off
+void esb_set_stats_detailed(uint32_t duration_seconds); // Enable for duration (0 = toggle)
+bool esb_get_stats_detailed_enabled(void);      // Get current status
+uint32_t esb_get_stats_detailed_remaining(void); // Get remaining time (0 if no auto-disable)
+
 // Remote command API
 void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
 void esb_send_remote_command_all(uint8_t command_flag);

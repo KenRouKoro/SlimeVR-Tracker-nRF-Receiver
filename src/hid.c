@@ -22,6 +22,7 @@
 */
 #include "globals.h"
 #include "hid.h"
+#include "connection/esb.h"
 
 #include <limits.h>
 #include <zephyr/kernel.h>
@@ -254,7 +255,7 @@ static void send_report(struct k_work *work)
 	}
 }
 
-#define DROPPED_REPORT_LOG_INTERVAL 5000
+#define DROPPED_REPORT_LOG_INTERVAL 1000  // Log every 1 second when stats enabled
 
 static void hid_dropped_reports_logging(void)
 {
@@ -266,6 +267,12 @@ static void hid_dropped_reports_logging(void)
 
 		int64_t now = k_uptime_get();
 		hid_stats_update_idle_if_needed(now);
+
+		// Only log when detailed stats are enabled
+		if (!esb_get_stats_detailed_enabled()) {
+			last_log_time = now;
+			continue;
+		}
 
 		if (now - last_log_time >= DROPPED_REPORT_LOG_INTERVAL) {
 			bool had_activity = false;
