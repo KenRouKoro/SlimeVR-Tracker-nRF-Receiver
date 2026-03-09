@@ -1169,7 +1169,7 @@ int esb_initialize(bool tx)
 		config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
-		// config.use_fast_ramp_up = true;
+		config.use_fast_ramp_up = true;
 	} else {
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
 		config.mode = ESB_MODE_PRX;
@@ -1183,7 +1183,7 @@ int esb_initialize(bool tx)
 		// config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
-		// config.use_fast_ramp_up = true;
+		config.use_fast_ramp_up = true;
 	}
 
 	LOG_INF("Initializing ESB, %sX mode", tx ? "T" : "R");
