@@ -173,7 +173,7 @@ static void print_help(void)
 		"    Commands: shutdown, calibrate, 6-side, meow, scan,\n"
 		"              mag <on|off|clear|cal>, reboot, clear, dfu,\n"
 		"              channel <1-100>, clearchannel,\n"
-		"              sens <x,y,z|reset>, reset <zro|acc|bat|mag|tcal>, ping\n"
+		"              sens <x,y,z|reset>, reset <zro|acc|bat|mag|tcal|fusion>, ping\n"
 	);
 
 	printk(
@@ -683,7 +683,7 @@ static void console_thread(void)
 				} else if (strcmp(arg2, "reset") == 0) {
 					// reset command - needs arg3 for subcommand
 					if (!arg3) {
-						printk("Usage: send <id|all> reset <zro|acc|bat|mag|tcal>\n");
+						printk("Usage: send <id|all> reset <zro|acc|bat|mag|tcal|fusion>\n");
 						printk("Example: send 0 reset zro\n");
 						printk("Example: send all reset acc\n");
 						continue;
@@ -707,9 +707,12 @@ static void console_thread(void)
 					} else if (strcmp(arg3, "tcal") == 0) {
 						reset_cmd = ESB_PONG_FLAG_RESET_TCAL;
 						reset_name = "Temperature calibration reset";
+					} else if (strcmp(arg3, "fusion") == 0) {
+						reset_cmd = ESB_PONG_FLAG_FUSION_RESET;
+						reset_name = "Fusion reset";
 					} else {
 						printk("Unknown reset command: %s\n", arg3);
-						printk("Available: zro, acc, bat, mag, tcal\n");
+						printk("Available: zro, acc, bat, mag, tcal, fusion\n");
 						continue;
 					}
 
