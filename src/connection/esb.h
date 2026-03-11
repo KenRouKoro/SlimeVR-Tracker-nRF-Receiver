@@ -63,6 +63,8 @@
 #define ESB_PONG_FLAG_MAG_OFF 0x1A       // Disable magnetometer
 #define ESB_PONG_FLAG_TCAL_ON 0x1B       // Enable T-Cal (temperature calibration)
 #define ESB_PONG_FLAG_TCAL_OFF 0x1C      // Disable T-Cal (temperature calibration)
+#define ESB_PONG_FLAG_TDMA_ON 0x1D       // Enable TDMA scheduling
+#define ESB_PONG_FLAG_TDMA_OFF 0x1E      // Disable TDMA scheduling
 
 void event_handler(struct esb_evt const *event);
 int clocks_start(void);

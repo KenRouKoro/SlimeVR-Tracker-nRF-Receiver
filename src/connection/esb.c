@@ -1670,6 +1670,12 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 		case ESB_PONG_FLAG_TCAL_BOOT_OFF:
 			cmd_name = "TCAL_BOOT_OFF";
 			break;
+		case ESB_PONG_FLAG_TDMA_ON:
+			cmd_name = "TDMA_ON";
+			break;
+		case ESB_PONG_FLAG_TDMA_OFF:
+			cmd_name = "TDMA_OFF";
+			break;
 		}
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", cmd_name, command_flag, tracker_id);
 	} else {
@@ -1766,6 +1772,12 @@ void esb_send_remote_command_all(uint8_t command_flag)
 		break;
 	case ESB_PONG_FLAG_TCAL_BOOT_OFF:
 		cmd_name = "TCAL_BOOT_OFF";
+		break;
+	case ESB_PONG_FLAG_TDMA_ON:
+		cmd_name = "TDMA_ON";
+		break;
+	case ESB_PONG_FLAG_TDMA_OFF:
+		cmd_name = "TDMA_OFF";
 		break;
 	}
 

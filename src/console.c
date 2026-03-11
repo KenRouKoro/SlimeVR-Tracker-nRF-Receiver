@@ -495,7 +495,7 @@ static void console_thread(void)
 				printk("  send all dfu         - Enter DFU mode on all trackers\n");
 				printk(
 					"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
-					"reset, ping, tcal\n"
+					"reset, ping, tcal, tdma\n"
 				);
 			} else {
 				// Parse target (id or "all")
@@ -829,12 +829,43 @@ static void console_thread(void)
 							printk("%s request sent to tracker %d\n", tcal_name, tracker_id);
 						}
 					} else {
-						printk("Unknown tcal subcommand: %s (use 'on', 'off', 'auto', 'boot' or 'clear')\n", arg3);
-					}
-					continue;
-				}
+							printk("Unknown tcal subcommand: %s (use 'on', 'off', 'auto', 'boot' or 'clear')\n", arg3);
+						}
+						continue;
+					} else if (strcmp(arg2, "tdma") == 0) {
+						// tdma command - supports "on/off"
+						if (!arg3) {
+							printk("Usage: send <id|all> tdma <on|off>\n");
+							printk("Example: send 0 tdma on       - Enable TDMA scheduling on tracker 0\n");
+							printk("Example: send all tdma off    - Disable TDMA scheduling on all trackers\n");
+							continue;
+						}
 
-				if (cmd_flag != 0xFF) {
+						if (strcmp(arg3, "on") == 0) {
+							// Enable TDMA
+							if (target_all) {
+								esb_send_remote_command_all(ESB_PONG_FLAG_TDMA_ON);
+								printk("TDMA enable request sent to all trackers\n");
+							} else {
+								esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TDMA_ON);
+								printk("TDMA enable request sent to tracker %d\n", tracker_id);
+							}
+						} else if (strcmp(arg3, "off") == 0) {
+							// Disable TDMA
+							if (target_all) {
+								esb_send_remote_command_all(ESB_PONG_FLAG_TDMA_OFF);
+								printk("TDMA disable request sent to all trackers\n");
+							} else {
+								esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TDMA_OFF);
+								printk("TDMA disable request sent to tracker %d\n", tracker_id);
+							}
+						} else {
+							printk("Unknown tdma subcommand: %s (use 'on' or 'off')\n", arg3);
+						}
+						continue;
+					}
+
+					if (cmd_flag != 0xFF) {
 					if (target_all) {
 						esb_send_remote_command_all(cmd_flag);
 						printk("%s request sent to all trackers\n", cmd_name);
@@ -846,7 +877,7 @@ static void console_thread(void)
 					printk("Unknown command: %s\n", arg2);
 					printk(
 						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, fusion, sens, "
-						"reset, ping, tcal\n"
+						"reset, ping, tcal, tdma\n"
 					);
 				}
 			}
