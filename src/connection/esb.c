@@ -1218,7 +1218,7 @@ int esb_initialize(bool tx)
 	return 0;
 }
 
-static void esb_deinitialize(void)
+void esb_deinitialize(void)
 {
 	LOG_INF("ESB deinitialize requested");
 	if (esb_initialized) {

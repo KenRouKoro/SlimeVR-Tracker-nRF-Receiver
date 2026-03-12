@@ -69,6 +69,7 @@
 void event_handler(struct esb_evt const *event);
 int clocks_start(void);
 int esb_initialize(bool);
+void esb_deinitialize(void);
 
 void esb_set_addr_discovery(void);
 void esb_set_addr_paired(void);

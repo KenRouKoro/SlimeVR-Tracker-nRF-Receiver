@@ -33,6 +33,7 @@
 #include <zephyr/sys/reboot.h>
 #include <zephyr/logging/log_ctrl.h>
 #include "connection/esb.h"
+#include "connection/rssi_scan.h"
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -168,6 +169,12 @@ static void print_help(void)
 	);
 
 	printk(
+		"RSSI / Channel Scan:\n"
+		"  rssi_scan                  Scan RSSI across channels 1-100 and print a recommended channel\n"
+		"\n"
+	);
+
+	printk(
 		"Remote Commands:\n"
 		"  send <id|all> <command>    Send remote command to tracker(s)\n"
 		"    Commands: shutdown, calibrate, 6-side, meow, scan,\n"
@@ -294,6 +301,7 @@ static void console_thread(void)
 	uint8_t command_resetstats[] = "resetstats";
 	uint8_t command_channel[] = "channel";
 	uint8_t command_clearchannel[] = "clearchannel";
+	uint8_t command_rssi_scan[] = "rssi_scan";
 	uint8_t command_send[] = "send";
 	uint8_t command_help[] = "help";
 
@@ -464,6 +472,8 @@ static void console_thread(void)
 			}
 		} else if (memcmp(line, command_resetstats, sizeof(command_resetstats)) == 0) {
 			esb_reset_all_stats();
+		} else if (memcmp(line, command_rssi_scan, sizeof(command_rssi_scan)) == 0) {
+			rssi_scan_run_and_print();
 		} else if (memcmp(line, command_channel, sizeof(command_channel)) == 0) {
 			if (!arg) {
 				printk("Usage: channel <1-100>\n");
