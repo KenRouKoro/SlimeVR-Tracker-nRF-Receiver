@@ -62,7 +62,7 @@ static bool wait_for_event_and_clear(volatile uint32_t *evt_reg, uint32_t timeou
  *
  * Note:
  * - RSSISAMPLE represents -dBm.
- * - Therefore MIN(sample) corresponds to the strongest energy observed (worst case).
+ * - Therefore MIN(sample) corresponds to the strongest energy observed (lowest case).
  */
 static uint8_t rssi_scan_channel_measure_min_n(uint8_t channel, uint32_t samples)
 {
@@ -120,9 +120,9 @@ static uint8_t get_current_effective_channel(void)
 
 static bool better_channel(
 	uint8_t ch_a,
-	uint8_t worst_a,
+	uint8_t lowest_a,
 	uint8_t ch_b,
-	uint8_t worst_b,
+	uint8_t lowest_b,
 	uint8_t current_ch
 )
 {
@@ -130,11 +130,11 @@ static bool better_channel(
 		return true;
 	}
 
-	// Primary: maximize worst (higher = cleaner).
-	if (worst_a > worst_b) {
+	// Primary: maximize lowest (higher = cleaner).
+	if (lowest_a > lowest_b) {
 		return true;
 	}
-	if (worst_a < worst_b) {
+	if (lowest_a < lowest_b) {
 		return false;
 	}
 
@@ -166,7 +166,6 @@ void rssi_scan_run_and_print(void)
 		RSSI_SCAN_SWEEPS,
 		(uint32_t)RSSI_SCAN_SAMPLES_PER_CH * (uint32_t)RSSI_SCAN_SWEEPS
 	);
-	printk("Scoring: worst (min RSSI across all samples). Higher=cleaner, est dBm=-sample\n");
 
 	// Pause ESB RX (manual diagnostic; link will be interrupted).
 	(void)esb_stop_rx();
@@ -175,13 +174,13 @@ void rssi_scan_run_and_print(void)
 
 	// sweep_min[sweep][ch] = per-sweep minimum RSSI sample for that channel.
 	static uint8_t sweep_min[RSSI_SCAN_SWEEPS][RSSI_SCAN_LAST_CHANNEL + 1];
-	static uint8_t score_worst[RSSI_SCAN_LAST_CHANNEL + 1];
+	static uint8_t score_lowest[RSSI_SCAN_LAST_CHANNEL + 1];
 
 	for (uint8_t ch = RSSI_SCAN_FIRST_CHANNEL; ch <= RSSI_SCAN_LAST_CHANNEL; ch++) {
 		for (int sweep = 0; sweep < RSSI_SCAN_SWEEPS; sweep++) {
 			sweep_min[sweep][ch] = RSSI_SAMPLE_MAX;
 		}
-		score_worst[ch] = 0;
+		score_lowest[ch] = 0;
 	}
 
 	for (int sweep = 0; sweep < RSSI_SCAN_SWEEPS; sweep++) {
@@ -198,18 +197,18 @@ void rssi_scan_run_and_print(void)
 		}
 	}
 
-	// Reduce sweeps into per-channel scores (only worst).
+	// Reduce sweeps into per-channel scores (only lowest).
 	for (uint8_t ch = RSSI_SCAN_FIRST_CHANNEL; ch <= RSSI_SCAN_LAST_CHANNEL; ch++) {
-		uint8_t worst = RSSI_SAMPLE_MAX;
+		uint8_t lowest = RSSI_SAMPLE_MAX;
 
 		for (int sweep = 0; sweep < RSSI_SCAN_SWEEPS; sweep++) {
 			uint8_t v = sweep_min[sweep][ch];
-			if (v < worst) {
-				worst = v;
+			if (v < lowest) {
+				lowest = v;
 			}
 		}
 
-		score_worst[ch] = worst;
+		score_lowest[ch] = lowest;
 	}
 
 	uint8_t current_ch = get_current_effective_channel();
@@ -217,9 +216,9 @@ void rssi_scan_run_and_print(void)
 	for (uint8_t ch = RSSI_SCAN_FIRST_CHANNEL; ch <= RSSI_SCAN_LAST_CHANNEL; ch++) {
 		if (better_channel(
 				ch,
-				score_worst[ch],
+				score_lowest[ch],
 				recommended,
-				recommended ? score_worst[recommended] : 0,
+				recommended ? score_lowest[recommended] : 0,
 				current_ch
 			)) {
 			recommended = ch;
@@ -228,13 +227,12 @@ void rssi_scan_run_and_print(void)
 
 	printk("Current channel (effective): %u\n", current_ch);
 	printk(
-		"Recommended: ch%u (worst=%u, %ddBm)\n\n",
+		"Recommended: channel %u (-%d dBm)\n\n",
 		recommended,
-		score_worst[recommended],
-		-(int)score_worst[recommended]
+		score_lowest[recommended]
 	);
 
-	// Sort all channels by worst using simple insertion sort.
+	// Sort all channels by lowest using simple insertion sort.
 	enum { NUM_CH = RSSI_SCAN_LAST_CHANNEL - RSSI_SCAN_FIRST_CHANNEL + 1 };
 	uint8_t sorted_ch[NUM_CH];
 	for (int i = 0; i < NUM_CH; i++) {
@@ -246,9 +244,9 @@ void rssi_scan_run_and_print(void)
 		while (j >= 0
 			   && better_channel(
 				   key,
-				   score_worst[key],
+				   score_lowest[key],
 				   sorted_ch[j],
-				   score_worst[sorted_ch[j]],
+				   score_lowest[sorted_ch[j]],
 				   current_ch
 			   )) {
 			sorted_ch[j + 1] = sorted_ch[j];
@@ -258,12 +256,12 @@ void rssi_scan_run_and_print(void)
 	}
 
 	// Print all channels in compact table format
-	// Format: "CH(WST)" where WST is worst (min across all samples).
-	printk("All channels sorted by cleanliness (higher is cleaner):\n");
-	enum { PER_LINE = 10 };
+	// Format: "CH(WST)" where WST is lowest (min across all samples).
+	printk("All channels sorted by RSSI (lower is better):\n");
+	enum { PER_LINE = 8 };
 	for (int i = 0; i < NUM_CH; i++) {
 		uint8_t ch = sorted_ch[i];
-		printk("%3u (%2u)", ch, score_worst[ch]);
+		printk("%3u (-%2d dBm)", ch, score_lowest[ch]);
 		if ((i + 1) % PER_LINE == 0 || i == NUM_CH - 1) {
 			printk("\n");
 			k_msleep(20);
