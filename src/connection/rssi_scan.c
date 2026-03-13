@@ -20,8 +20,8 @@
 #define RSSI_SCAN_FIRST_CHANNEL 1
 #define RSSI_SCAN_LAST_CHANNEL 100
 
-#define RSSI_SCAN_SAMPLES_PER_CH 20
-#define RSSI_SCAN_SWEEPS 100
+#define RSSI_SCAN_SAMPLES_PER_CH 50
+#define RSSI_SCAN_SWEEPS 200
 
 // Optional spacing. 0 = as fast as possible.
 #define RSSI_SCAN_INTER_SAMPLE_US 0
