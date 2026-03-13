@@ -1092,8 +1092,84 @@ void event_handler(struct esb_evt const *event)
 								   rx_payload.rssi); // write to hid endpoint
 			} break;
 			default:
-				LOG_ERR("Wrong packet length: %d", rx_payload.length);
-				break;
+			{
+				/* Composite packet (type 0x05): variable length.
+				 * Format: [0x05][tracker_id][sub_count][sub_type0][sub_data0...]...[sequence]
+				 * Each sub-packet: 1 byte type + variable data.
+				 */
+				if (rx_payload.length < 5 || rx_payload.data[0] != ESB_COMPOSITE_TYPE) {
+					LOG_ERR("Wrong packet length: %d", rx_payload.length);
+					break;
+				}
+
+				uint8_t tracker_id = rx_payload.data[1];
+				uint8_t sub_count = rx_payload.data[2];
+
+				if (tracker_id >= stored_trackers) {
+					continue;
+				}
+
+				LOG_DBG("Received composite packet from tracker %d with %d sub-packets", tracker_id, sub_count);
+
+				/* Sequence byte is at the very end of the composite packet */
+				uint8_t received_sequence = rx_payload.data[rx_payload.length - 1];
+				int seq_result = check_packet_sequence(tracker_id, received_sequence);
+				if (seq_result == 4 || seq_result == 2) {
+					LOG_WRN(
+						"TRK %d: Composite packet seq=%d is %s, dropped",
+						tracker_id,
+						received_sequence,
+						seq_result == 4 ? "duplicate" : "out-of-order"
+					);
+					break; /* duplicate or out-of-order */
+				}
+
+				/* Parse sub-packets and reconstruct standard 16-byte packets */
+				int pos = 3; /* skip header: type, id, sub_count */
+				int end = rx_payload.length - 1; /* exclude sequence byte */
+
+				for (int i = 0; i < sub_count && pos < end; i++) {
+					uint8_t sub_type = rx_payload.data[pos++];
+					int sub_len;
+
+					/* Determine sub-packet data length */
+					switch (sub_type) {
+					case 0: sub_len = 13; break; /* info */
+					case 1: sub_len = 14; break; /* quat+accel */
+					case 2: sub_len = 13; break; /* compact quat */
+					case 3: sub_len = 2; break;  /* status */
+					case 4: sub_len = 14; break; /* quat+mag */
+					default:
+						LOG_ERR("Unknown composite sub-type: %d", sub_type);
+						sub_len = -1;
+						break;
+					}
+
+					if (sub_len < 0 || pos + sub_len > end) {
+						break;
+					}
+
+					/* Reconstruct a standard 16-byte packet */
+					uint8_t pkt[16] = {0};
+					pkt[0] = sub_type;
+					pkt[1] = tracker_id;
+					memcpy(&pkt[2], &rx_payload.data[pos], MIN(sub_len, 14));
+
+					/* For status packets (type 3), fill packet loss stats */
+					if (sub_type == 3) {
+						struct packet_stats *stats = &tracker_stats[tracker_id];
+						pkt[4] = stats->status_received;
+						pkt[5] = stats->status_lost;
+						pkt[6] = 0;
+						pkt[7] = 0;
+						stats->status_received = 0;
+						stats->status_lost = 0;
+					}
+
+					hid_write_packet_n(pkt, rx_payload.rssi);
+					pos += sub_len;
+				}
+			} break;
 			}
 		}
 	} break;
@@ -1167,7 +1243,7 @@ int esb_initialize(bool tx)
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
 		// config.retransmit_count = 0;
 		config.tx_mode = ESB_TXMODE_MANUAL;
-		// config.payload_length = 32;
+		// config.payload_length = 32;  // config by CONFIG_ESB_MAX_PAYLOAD_LENGTH
 		config.selective_auto_ack = true;
 		config.use_fast_ramp_up = true;
 	} else {
@@ -1181,7 +1257,7 @@ int esb_initialize(bool tx)
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
 		// config.retransmit_count = 3;
 		// config.tx_mode = ESB_TXMODE_MANUAL;
-		// config.payload_length = 32;
+		// config.payload_length = 32;  // config by CONFIG_ESB_MAX_PAYLOAD_LENGTH
 		config.selective_auto_ack = true;
 		config.use_fast_ramp_up = true;
 	}

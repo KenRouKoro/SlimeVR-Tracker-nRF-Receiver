@@ -31,6 +31,8 @@
 #define ESB_PONG_TYPE 0xF1
 #define ESB_PING_LEN 13
 #define ESB_PONG_LEN 13
+#define ESB_MAX_PAYLOAD_LEN CONFIG_ESB_MAX_PAYLOAD_LENGTH
+#define ESB_COMPOSITE_TYPE 0x05 // Composite packet containing multiple sub-packets
 
 // Remote command flags for PONG data[7]
 #define ESB_PONG_FLAG_NORMAL 0x00
