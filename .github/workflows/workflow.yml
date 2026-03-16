@@ -118,6 +118,9 @@ jobs:
                   {boardname: "nrf52840dk/nrf52840", filename: "SlimeNRF_nRF52840dk_Receiver"},
                   {boardname: "styria_r1_uf2/nrf52840", filename: "SlimeNRF_Styria_R1_Receiver"},
                   {boardname: "aerorx_r1_uf2/nrf52840", filename: "SlimeNRF_AeroRX_R1_Receiver"},
+                  {boardname: "foxdongle_uf2/nrf52840",filename: "FoxApplication_FoxDongle" },
+                  {boardname: "foxdongle33_uf2/nrf52833",filename: "FoxApplication_FoxDongle33" },
+                  {boardname: "foxpromicro_rfek_uf2/nrf52840", filename: "FoxApplication_FoxProMicro_RFEK" },
                 ]
     runs-on: ubuntu-latest
     steps:
