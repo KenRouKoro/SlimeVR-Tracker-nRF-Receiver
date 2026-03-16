@@ -31,16 +31,17 @@
 #include "hid.h"
 #include "system/system.h"
 
+LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
+
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 #define PAIRING_TIMEOUT_SECONDS CONFIG_PAIRING_TIMEOUT
 
-// TDMA parameters (copied from Tracker)
+// TDMA parameters (must match Tracker's tdma.h)
 #define TDMA_ENABLED 0
 #define TDMA_NUM_TRACKERS 10
-#define TDMA_PACKETS_PER_SECOND 111 // Target TPS per tracker
-#define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
-#define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
+#define TDMA_SLOT_TICKS    18  /* ~550μs at 32768Hz */
+#define TDMA_FRAME_TICKS   (TDMA_SLOT_TICKS * TDMA_NUM_TRACKERS)  /* 180 ticks ≈ 5.5ms */
 
 static struct esb_payload rx_payload;
 // static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
@@ -144,21 +145,101 @@ static int64_t last_tps_print_time = 0;                     // Last time total T
 
 // TDMA Statistics
 struct tdma_stats {
-	int64_t sum_offset;
-	uint64_t sum_sq_offset;
-	int32_t min_offset;
-	int32_t max_offset;
-	uint32_t count;
-	uint32_t violations;
-	int64_t last_log_time;
+	int64_t sum_offset;      // Sum of center offsets in ticks
+	uint64_t sum_sq_offset;  // Sum of squared offsets for variance
+	int32_t min_offset;      // Minimum offset seen
+	int32_t max_offset;      // Maximum offset seen
+	uint32_t count;          // Packet count
+	uint32_t violations;     // Slot violation count
+	int64_t last_log_time;   // Last log output time
 };
 
 static struct tdma_stats g_tdma_stats[MAX_TRACKERS] = {0};
 
+/* Last observed time-sync error from PING (rx_ticks - expected_rx_ticks), per tracker.
+ * Used only for diagnostics to understand TDMA phase offset on receiver side. */
+static int32_t g_last_ping_rx_time_diff_ticks[MAX_TRACKERS] = {0};
+static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS] = {0};
+
+#if TDMA_ENABLED
+/**
+ * Check if a packet from a tracker arrived in its assigned TDMA slot.
+ * Updates statistics for diagnostics.
+ *
+ * @param tracker_id   The tracker's ID (0-9)
+ * @param rx_ticks     Receiver time in ticks when packet arrived
+ */
+static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
+{
+	if (tracker_id >= MAX_TRACKERS) {
+		return;
+	}
+
+	/* Calculate which slot this tracker should use */
+	uint8_t expected_slot = tracker_id % TDMA_NUM_TRACKERS;
+
+	/* Calculate current position in the TDMA frame */
+	uint32_t frame_phase = rx_ticks % TDMA_FRAME_TICKS;
+	uint32_t current_slot = frame_phase / TDMA_SLOT_TICKS;
+
+	/* Reference point for offset statistics: expected slot start (ticks) */
+	int32_t expected_ref_ticks = (expected_slot * TDMA_SLOT_TICKS);
+	int32_t ref_offset = (int32_t)frame_phase - expected_ref_ticks;
+
+	/* Update statistics */
+	struct tdma_stats *stats = &g_tdma_stats[tracker_id];
+	stats->count++;
+	stats->sum_offset += ref_offset;
+	stats->sum_sq_offset += ((int64_t)ref_offset * ref_offset);
+
+	if (stats->count == 1) {
+		stats->min_offset = ref_offset;
+		stats->max_offset = ref_offset;
+	} else {
+		if (ref_offset < stats->min_offset) {
+			stats->min_offset = ref_offset;
+		}
+		if (ref_offset > stats->max_offset) {
+			stats->max_offset = ref_offset;
+		}
+	}
+
+	/* Check for slot violation: only count as violation if NOT inside the expected slot. */
+	if (current_slot != expected_slot) {
+		stats->violations++;
+
+		/* Rate-limit per tracker to avoid flooding logs */
+		if ((stats->violations & 0x0F) == 1) {
+			uint32_t ticks_into_slot = frame_phase % TDMA_SLOT_TICKS;
+			int32_t ping_diff = g_last_ping_rx_time_diff_valid[tracker_id]
+				? g_last_ping_rx_time_diff_ticks[tracker_id]
+				: 0;
+
+			LOG_DBG(
+				"TDMA viol trk=%u exp=%u got=%u phase=%u in=%u/%u off=%d ping_diff=%d",
+				tracker_id,
+				expected_slot,
+				current_slot,
+				frame_phase,
+				ticks_into_slot,
+				(uint32_t)TDMA_SLOT_TICKS,
+				ref_offset,
+				ping_diff
+			);
+		}
+	}
+}
+#else
+/* When TDMA is disabled, provide a no-op stub */
+static inline void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
+{
+	ARG_UNUSED(tracker_id);
+	ARG_UNUSED(rx_ticks);
+}
+#endif
+
 static void esb_stats_thread(void);
 K_THREAD_DEFINE(esb_stats_thread_id, 512, esb_stats_thread, NULL, NULL, NULL, 8, 0, 0);
-
-LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
 K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 7, 0, 0);
@@ -591,10 +672,9 @@ void event_handler(struct esb_evt const *event)
 		break;
 	case ESB_EVENT_RX_RECEIVED: {
 		int err = 0;
+		uint32_t current_rx_ticks = k_uptime_ticks();
 		while (!err) {
 			err = esb_read_rx_payload(&rx_payload);
-			uint32_t current_rx_ticks = k_uptime_ticks();
-			uint64_t current_rx_us = k_ticks_to_us_floor64(current_rx_ticks);
 			if (err == -ENODATA) {
 				break;
 			} else if (err) {
@@ -697,6 +777,9 @@ void event_handler(struct esb_evt const *event)
 
 					// Diagnostic: Compare expected vs actual receiver time
 					int32_t rx_time_diff_ticks = (int32_t)(current_rx_ticks - expected_rx_ticks);
+					g_last_ping_rx_time_diff_ticks[tracker_id] = rx_time_diff_ticks;
+					g_last_ping_rx_time_diff_valid[tracker_id] = true;
+
 					uint64_t rx_time_diff_us
 						= k_ticks_to_us_floor64((rx_time_diff_ticks < 0 ? -rx_time_diff_ticks : rx_time_diff_ticks));
 #if !TDMA_ENABLED
@@ -724,9 +807,9 @@ void event_handler(struct esb_evt const *event)
 						}
 
 #if TDMA_ENABLED
-						if (stats->violations > 3) {
+						if (stats->violations > 2) {
 							LOG_WRN(
-								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld us StdDev=%u us Range=[%d, %d] "
+								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld ticks StdDev=%u ticks Range=[%d, %d] "
 								"RxTimeDiff=%s%llu us",
 								tracker_id,
 								stats->count,
@@ -740,7 +823,7 @@ void event_handler(struct esb_evt const *event)
 							);
 						} else {
 							LOG_DBG(
-								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld us StdDev=%u us Range=[%d, %d] "
+								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld ticks StdDev=%u ticks Range=[%d, %d] "
 								"RxTimeDiff=%s%llu us",
 								tracker_id,
 								stats->count,
@@ -753,6 +836,8 @@ void event_handler(struct esb_evt const *event)
 								rx_time_diff_us
 							);
 						}
+#else
+						ARG_UNUSED(rx_time_diff_ticks);
 #endif
 					}
 
@@ -1009,36 +1094,7 @@ void event_handler(struct esb_evt const *event)
 				uint8_t tracker_id = rx_payload.data[1];
 
 				// TDMA Slot Check for Data (Type 17)
-				if (tracker_id < MAX_TRACKERS) {
-					uint64_t slot_offset = current_rx_us % TDMA_PACKET_INTERVAL_US;
-					uint64_t expected_start = tracker_id * TDMA_SLOT_DURATION_US;
-					uint64_t expected_end = (tracker_id + 1) * TDMA_SLOT_DURATION_US;
-
-					// Calculate signed offset from the center of the expected slot
-					int64_t center_offset
-						= (int64_t)slot_offset - (int64_t)(expected_start + TDMA_SLOT_DURATION_US / 2);
-
-					// Update stats
-					struct tdma_stats *stats = &g_tdma_stats[tracker_id];
-					stats->count++;
-					stats->sum_offset += center_offset;
-					stats->sum_sq_offset += (center_offset * center_offset);
-					if (stats->count == 1) {
-						stats->min_offset = center_offset;
-						stats->max_offset = center_offset;
-					} else {
-						if (center_offset < stats->min_offset) {
-							stats->min_offset = center_offset;
-						}
-						if (center_offset > stats->max_offset) {
-							stats->max_offset = center_offset;
-						}
-					}
-
-					if (slot_offset < expected_start || slot_offset >= expected_end) {
-						stats->violations++;
-					}
-				}
+				tdma_check_slot(tracker_id, current_rx_ticks);
 
 				if (tracker_id >= stored_trackers) { // not a stored tracker
 					continue;
@@ -1104,6 +1160,9 @@ void event_handler(struct esb_evt const *event)
 
 				uint8_t tracker_id = rx_payload.data[1];
 				uint8_t sub_count = rx_payload.data[2];
+
+				// TDMA Slot Check for Composite Packet
+				tdma_check_slot(tracker_id, current_rx_ticks);
 
 				if (tracker_id >= stored_trackers) {
 					continue;
