@@ -33,6 +33,7 @@
 #include <zephyr/sys/reboot.h>
 #include <zephyr/logging/log_ctrl.h>
 #include "connection/esb.h"
+#include "connection/rssi_scan.h"
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -78,6 +79,7 @@ static void print_info(void)
 {
 	printk(CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT "\n");
 	printk(FW_STRING);
+	printk("Repo: %s | Branch: %s | Author: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH, FW_GIT_AUTHOR);
 
 	printk("\nBoard: " CONFIG_BOARD "\n");
 	printk("SOC: " CONFIG_SOC "\n");
@@ -141,24 +143,34 @@ static void print_help(void)
 		"  reboot                     Soft reset the device\n"
 		"  add <address>              Manually add a device\n"
 		"  remove                     Remove last device\n"
-		"  pair                       Enter pairing mode\n"
+		"  pair [count]               Enter pairing mode\n"
+		"    pair                     Pair indefinitely (timeout after %d seconds)\n"
+		"    pair 4                   Exit after pairing 4 new devices\n"
 		"  exit                       Exit pairing mode\n"
 		"  clear                      Clear stored devices\n"
-		"\n"
+		"\n",
+		CONFIG_PAIRING_TIMEOUT
 	);
 
 	printk(
 		"Statistics:\n"
-		"  stats                      Show packet statistics\n"
+		"  stats                      Toggle detailed packet statistics\n"
+		"  stats <seconds>            Show detailed stats for N seconds\n"
 		"  resetstats                 Reset packet statistics\n"
 		"\n"
 	);
 
 	printk(
 		"RF Channel (Local Receiver):\n"
-		"  channel <0-100>            Set receiver RF channel only\n"
+		"  channel <1-100>            Set receiver RF channel only\n"
 		"    Example: channel 25       Set receiver to channel 25\n"
 		"  clearchannel               Clear receiver RF channel (use default)\n"
+		"\n"
+	);
+
+	printk(
+		"RSSI / Channel Scan:\n"
+		"  rssi_scan                  Scan RSSI across channels 1-100 and print a recommended channel\n"
 		"\n"
 	);
 
@@ -167,8 +179,8 @@ static void print_help(void)
 		"  send <id|all> <command>    Send remote command to tracker(s)\n"
 		"    Commands: shutdown, calibrate, 6-side, meow, scan,\n"
 		"              mag <on|off|clear|cal>, reboot, clear, dfu,\n"
-		"              channel <0-100>, clearchannel,\n"
-		"              sens <x,y,z|reset>, reset <zro|acc|bat|mag|tcal>, ping\n"
+		"              channel <1-100>, clearchannel,\n"
+		"              sens <x,y,z|reset>, reset <zro|acc|bat|mag|tcal|fusion>, ping\n"
 	);
 
 	printk(
@@ -271,6 +283,7 @@ static void console_thread(void)
 
 	printk("*** " CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT " ***\n");
 	printk(FW_STRING);
+	printk("Repo: %s | Branch: %s | Author: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH, FW_GIT_AUTHOR);
 
 	// Print help on startup
 	print_help();
@@ -288,6 +301,7 @@ static void console_thread(void)
 	uint8_t command_resetstats[] = "resetstats";
 	uint8_t command_channel[] = "channel";
 	uint8_t command_clearchannel[] = "clearchannel";
+	uint8_t command_rssi_scan[] = "rssi_scan";
 	uint8_t command_send[] = "send";
 	uint8_t command_help[] = "help";
 
@@ -401,25 +415,75 @@ static void console_thread(void)
 			skip_dfu();
 			sys_reboot(SYS_REBOOT_COLD);
 		} else if (memcmp(line, command_pair, sizeof(command_pair)) == 0) {
-			esb_reset_pair();
+			if (!arg) {
+				// No argument: traditional pairing mode with timeout
+				esb_start_pairing();
+				printk("Pairing mode enabled (auto-exit after %d seconds)\n", CONFIG_PAIRING_TIMEOUT);
+			} else {
+				// Parse target count
+				char *endptr;
+				long count = strtol(arg, &endptr, 10);
+				if (*endptr != '\0' || count < 0 || count > 255) {
+					printk("Invalid count. Usage: pair [count]\n");
+					printk("  pair       - Pair indefinitely (timeout after %d seconds)\n", CONFIG_PAIRING_TIMEOUT);
+					printk("  pair 4     - Exit after pairing 4 new devices\n");
+				} else if (count == 0) {
+					// pair 0 = same as no argument
+					esb_start_pairing();
+					printk("Pairing mode enabled (auto-exit after %d seconds)\n", CONFIG_PAIRING_TIMEOUT);
+				} else {
+					esb_start_pairing_with_count((uint8_t)count);
+					printk("Pairing mode enabled (auto-exit after %u new devices or %d seconds)\n", (uint8_t)count, CONFIG_PAIRING_TIMEOUT);
+				}
+			}
 		} else if (memcmp(line, command_exit, sizeof(command_exit)) == 0) {
 			esb_finish_pair();
 		} else if (memcmp(line, command_clear, sizeof(command_clear)) == 0) {
 			esb_clear();
 		} else if (memcmp(line, command_stats, sizeof(command_stats)) == 0) {
-			esb_print_all_stats();
+			if (!arg) {
+				// No argument: toggle detailed stats
+				bool enabled = esb_toggle_stats_detailed();
+				if (enabled) {
+					printk("Detailed stats enabled (toggle again to disable)\n");
+				} else {
+					printk("Detailed stats disabled\n");
+				}
+			} else {
+				// Parse duration
+				char *endptr;
+				long duration = strtol(arg, &endptr, 10);
+				if (*endptr != '\0' || duration < 0 || duration > 86400) {
+					printk("Invalid duration. Usage: stats [seconds]\n");
+					printk("  stats       - Toggle detailed stats on/off\n");
+					printk("  stats 30    - Show detailed stats for 30 seconds\n");
+				} else if (duration == 0) {
+					// stats 0 = toggle off
+					esb_set_stats_detailed(0);
+					if (esb_get_stats_detailed_enabled()) {
+						printk("Detailed stats disabled\n");
+					} else {
+						printk("Detailed stats enabled (toggle again to disable)\n");
+					}
+				} else {
+					esb_set_stats_detailed((uint32_t)duration);
+					printk("Detailed stats enabled for %ld seconds\n", duration);
+				}
+			}
 		} else if (memcmp(line, command_resetstats, sizeof(command_resetstats)) == 0) {
 			esb_reset_all_stats();
+		} else if (memcmp(line, command_rssi_scan, sizeof(command_rssi_scan)) == 0) {
+			rssi_scan_run_and_print();
 		} else if (memcmp(line, command_channel, sizeof(command_channel)) == 0) {
 			if (!arg) {
-				printk("Usage: channel <0-100>\n");
+				printk("Usage: channel <1-100>\n");
 				printk("Example: channel 25 - Set receiver RF channel to 25 (local only)\n");
 			} else {
 				char *endptr;
 				long channel = strtol(arg, &endptr, 10);
 
-				if (*endptr != '\0' || channel < 0 || channel > 100) {
-					printk("Invalid channel. Must be a number between 0 and 100.\n");
+				if (*endptr != '\0' || channel < 1 || channel > 100) {
+					printk("Invalid channel. Must be a number between 1 and 100.\n");
 				} else {
 					esb_set_receiver_channel((uint8_t)channel);
 					printk("Receiver RF channel set to %d (local only)\n", (int)channel);
@@ -441,7 +505,7 @@ static void console_thread(void)
 				printk("  send all dfu         - Enter DFU mode on all trackers\n");
 				printk(
 					"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
-					"reset, ping, tcal\n"
+					"reset, ping, tcal, tdma\n"
 				);
 			} else {
 				// Parse target (id or "all")
@@ -533,7 +597,7 @@ static void console_thread(void)
 				} else if (strcmp(arg2, "channel") == 0) {
 					// Special handling for channel command - needs arg3
 					if (!arg3) {
-						printk("Usage: send all channel <0-100>\n");
+						printk("Usage: send all channel <1-100>\n");
 						printk("Example: send all channel 25 - Set all trackers to channel 25\n");
 						continue;
 					}
@@ -541,8 +605,8 @@ static void console_thread(void)
 					char *endptr;
 					long channel = strtol(arg3, &endptr, 10);
 
-					if (*endptr != '\0' || channel < 0 || channel > 100) {
-						printk("Invalid channel. Must be a number between 0 and 100.\n");
+					if (*endptr != '\0' || channel < 1 || channel > 100) {
+						printk("Invalid channel. Must be a number between 1 and 100.\n");
 						continue;
 					}
 
@@ -629,7 +693,7 @@ static void console_thread(void)
 				} else if (strcmp(arg2, "reset") == 0) {
 					// reset command - needs arg3 for subcommand
 					if (!arg3) {
-						printk("Usage: send <id|all> reset <zro|acc|bat|mag|tcal>\n");
+						printk("Usage: send <id|all> reset <zro|acc|bat|mag|tcal|fusion>\n");
 						printk("Example: send 0 reset zro\n");
 						printk("Example: send all reset acc\n");
 						continue;
@@ -653,9 +717,12 @@ static void console_thread(void)
 					} else if (strcmp(arg3, "tcal") == 0) {
 						reset_cmd = ESB_PONG_FLAG_RESET_TCAL;
 						reset_name = "Temperature calibration reset";
+					} else if (strcmp(arg3, "fusion") == 0) {
+						reset_cmd = ESB_PONG_FLAG_FUSION_RESET;
+						reset_name = "Fusion reset";
 					} else {
 						printk("Unknown reset command: %s\n", arg3);
-						printk("Available: zro, acc, bat, mag, tcal\n");
+						printk("Available: zro, acc, bat, mag, tcal, fusion\n");
 						continue;
 					}
 
@@ -678,9 +745,11 @@ static void console_thread(void)
 					}
 					continue;
 				} else if (strcmp(arg2, "tcal") == 0) {
-					// tcal command - supports "auto on/off", "boot on/off" and "clear"
+					// tcal command - supports "on/off", "auto on/off", "boot on/off" and "clear"
 					if (!arg3) {
-						printk("Usage: send <id|all> tcal <auto on|auto off|boot on|boot off|clear>\n");
+						printk("Usage: send <id|all> tcal <on|off|auto on|auto off|boot on|boot off|clear>\n");
+						printk("Example: send 0 tcal on       - Enable temperature calibration on tracker 0\n");
+						printk("Example: send all tcal off    - Disable temperature calibration on all trackers\n");
 						printk("Example: send 0 tcal auto on  - Enable auto-calibration on tracker 0\n");
 						printk("Example: send all tcal auto off - Disable auto-calibration on all trackers\n");
 						printk("Example: send 0 tcal boot on - Enable boot calibration on tracker 0\n");
@@ -688,7 +757,25 @@ static void console_thread(void)
 						continue;
 					}
 
-					if (strcmp(arg3, "auto") == 0) {
+					if (strcmp(arg3, "on") == 0) {
+						// Enable T-Cal
+						if (target_all) {
+							esb_send_remote_command_all(ESB_PONG_FLAG_TCAL_ON);
+							printk("T-Cal enable request sent to all trackers\n");
+						} else {
+							esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TCAL_ON);
+							printk("T-Cal enable request sent to tracker %d\n", tracker_id);
+						}
+					} else if (strcmp(arg3, "off") == 0) {
+						// Disable T-Cal
+						if (target_all) {
+							esb_send_remote_command_all(ESB_PONG_FLAG_TCAL_OFF);
+							printk("T-Cal disable request sent to all trackers\n");
+						} else {
+							esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TCAL_OFF);
+							printk("T-Cal disable request sent to tracker %d\n", tracker_id);
+						}
+					} else if (strcmp(arg3, "auto") == 0) {
 						if (!arg4) {
 							printk("Usage: send <id|all> tcal auto <on|off>\n");
 							continue;
@@ -752,12 +839,43 @@ static void console_thread(void)
 							printk("%s request sent to tracker %d\n", tcal_name, tracker_id);
 						}
 					} else {
-						printk("Unknown tcal subcommand: %s (use 'auto', 'boot' or 'clear')\n", arg3);
-					}
-					continue;
-				}
+							printk("Unknown tcal subcommand: %s (use 'on', 'off', 'auto', 'boot' or 'clear')\n", arg3);
+						}
+						continue;
+					} else if (strcmp(arg2, "tdma") == 0) {
+						// tdma command - supports "on/off"
+						if (!arg3) {
+							printk("Usage: send <id|all> tdma <on|off>\n");
+							printk("Example: send 0 tdma on       - Enable TDMA scheduling on tracker 0\n");
+							printk("Example: send all tdma off    - Disable TDMA scheduling on all trackers\n");
+							continue;
+						}
 
-				if (cmd_flag != 0xFF) {
+						if (strcmp(arg3, "on") == 0) {
+							// Enable TDMA
+							if (target_all) {
+								esb_send_remote_command_all(ESB_PONG_FLAG_TDMA_ON);
+								printk("TDMA enable request sent to all trackers\n");
+							} else {
+								esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TDMA_ON);
+								printk("TDMA enable request sent to tracker %d\n", tracker_id);
+							}
+						} else if (strcmp(arg3, "off") == 0) {
+							// Disable TDMA
+							if (target_all) {
+								esb_send_remote_command_all(ESB_PONG_FLAG_TDMA_OFF);
+								printk("TDMA disable request sent to all trackers\n");
+							} else {
+								esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TDMA_OFF);
+								printk("TDMA disable request sent to tracker %d\n", tracker_id);
+							}
+						} else {
+							printk("Unknown tdma subcommand: %s (use 'on' or 'off')\n", arg3);
+						}
+						continue;
+					}
+
+					if (cmd_flag != 0xFF) {
 					if (target_all) {
 						esb_send_remote_command_all(cmd_flag);
 						printk("%s request sent to all trackers\n", cmd_name);
@@ -769,7 +887,7 @@ static void console_thread(void)
 					printk("Unknown command: %s\n", arg2);
 					printk(
 						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, fusion, sens, "
-						"reset, ping, tcal\n"
+						"reset, ping, tcal, tdma\n"
 					);
 				}
 			}
