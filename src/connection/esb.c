@@ -1260,14 +1260,13 @@ void event_handler(struct esb_evt const *event)
 				/* Sequence byte is at the very end of the composite packet */
 				uint8_t received_sequence = rx_payload.data[rx_payload.length - 1];
 				int seq_result = check_packet_sequence(tracker_id, received_sequence);
-				if (seq_result == 4 || seq_result == 2) {
+				if (seq_result == 2) {
 					LOG_WRN(
-						"TRK %d: Composite packet seq=%d is %s, dropped",
+						"TRK %d: Composite packet seq=%d is out-of-order, dropped",
 						tracker_id,
-						received_sequence,
-						seq_result == 4 ? "duplicate" : "out-of-order"
+						received_sequence
 					);
-					break; /* duplicate or out-of-order */
+					break; /* out-of-order */
 				}
 
 				/* Parse sub-packets and reconstruct standard 16-byte packets */
