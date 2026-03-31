@@ -42,9 +42,10 @@ LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 // TDMA config (slot index, total slots, slot ticks, epoch) into a volatile
 // uint32_t that the RADIO ISR reads atomically when constructing PONG packets.
 #define TDMA_ENABLED 1
-#define TDMA_MIN_SLOT_TICKS   14  /* minimum slot width (~427μs at 32768Hz) */
-#define TDMA_MAX_TPS_TARGET  200  /* max TPS per tracker */
-#define TDMA_TOLERANCE_TICKS   3  /* slot violation tolerance band */
+#define TDMA_MIN_SLOT_TICKS    14  /* minimum slot width (~427μs at 32768Hz) */
+#define TDMA_MAX_TPS_TARGET   200 /* max TPS per tracker */
+#define TDMA_TOLERANCE_TICKS    3  /* slot violation tolerance band */
+#define TDMA_RECONFIG_MIN_MS 5000  /* minimum interval between TDMA reconfigurations */
 
 // Dynamic TDMA config packed into uint32_t for atomic ISR access (ARM Cortex-M).
 // Layout: [31:24]=assigned_slot, [23:16]=total_slots, [15:8]=slot_ticks, [7:0]=epoch
@@ -53,6 +54,7 @@ static uint8_t tdma_config_epoch;           // wrapping counter, incremented on 
 static uint8_t tdma_dynamic_active_count;   // current number of active trackers
 static uint8_t tdma_dynamic_slot_ticks;     // current slot width in ticks
 static uint32_t tdma_active_mask;           // bitmask of active trackers (for change detection)
+static int64_t tdma_last_reconfig_time;     // timestamp of last reconfiguration (0 = never)
 
 static inline uint32_t tdma_pack_config(uint8_t slot, uint8_t total, uint8_t slot_ticks, uint8_t epoch)
 {
@@ -122,11 +124,21 @@ static void tdma_recalculate(void)
 		return;
 	}
 
+	/*
+	 * Rate-limit reconfiguration when trackers *disappear* to avoid
+	 * flapping from brief PING gaps.  New trackers should get slots
+	 * immediately so they stop transmitting in ALOHA mode ASAP.
+	 */
+	bool new_trackers_appeared = (new_mask & ~tdma_active_mask) != 0;
+	if (!new_trackers_appeared && tdma_last_reconfig_time > 0 &&
+	    (now - tdma_last_reconfig_time) < TDMA_RECONFIG_MIN_MS) {
+		return;
+	}
+
 	/* active_ids is already sorted (ascending) since we iterate 0..N */
 
 	uint8_t slot_ticks;
 	if (active_count <= 1) {
-		/* Single tracker or none: use wide slot, effectively no contention */
 		slot_ticks = TDMA_MIN_SLOT_TICKS;
 		if (active_count == 1) {
 			/* slot_ticks = 32768/200 = 163, but cap to keep frame short */
@@ -163,6 +175,7 @@ static void tdma_recalculate(void)
 	tdma_dynamic_active_count = active_count;
 	tdma_dynamic_slot_ticks = slot_ticks;
 	tdma_active_mask = new_mask;
+	tdma_last_reconfig_time = now;
 
 	if (active_count != old_count || slot_ticks != old_slot) {
 		uint32_t frame_ticks = (uint32_t)slot_ticks * active_count;
@@ -2318,6 +2331,32 @@ static void esb_thread(void)
 		esb_paired = true;
 	}
 	LOG_INF("%d/%d devices stored", tracker_count, MAX_TRACKERS);
+
+	/* Pre-fill TDMA config based on stored tracker count so trackers
+	 * receive a valid config on the very first PONG (before the periodic
+	 * recalculation detects them as active). */
+	if (tracker_count > 0) {
+		uint8_t init_slot;
+		if (tracker_count == 1) {
+			init_slot = 163;
+		} else {
+			uint32_t denom = TDMA_MAX_TPS_TARGET * tracker_count;
+			init_slot = (uint8_t)((32768 + denom - 1) / denom);
+			if (init_slot < TDMA_MIN_SLOT_TICKS) init_slot = TDMA_MIN_SLOT_TICKS;
+		}
+		tdma_config_epoch++;
+		for (uint8_t i = 0; i < tracker_count && i < MAX_TRACKERS; i++) {
+			tdma_config_packed[i] = tdma_pack_config(
+				i, tracker_count, init_slot, tdma_config_epoch);
+		}
+		tdma_dynamic_active_count = tracker_count;
+		tdma_dynamic_slot_ticks = init_slot;
+		tdma_active_mask = (1U << tracker_count) - 1;
+		uint32_t init_frame = (uint32_t)init_slot * tracker_count;
+		LOG_INF("TDMA initial: %u stored, slot=%u, frame=%u, ~%u TPS (epoch=%u)",
+			tracker_count, init_slot, init_frame,
+			init_frame > 0 ? 32768 / init_frame : 0, tdma_config_epoch);
+	}
 
 	// Cache receiver device address for ISR pairing responses
 	uint64_t *dev_addr = (uint64_t *)NRF_FICR->DEVICEADDR;
