@@ -37,11 +37,31 @@ LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 #define PAIRING_TIMEOUT_SECONDS CONFIG_PAIRING_TIMEOUT
 
-// TDMA parameters (must match Tracker's tdma.h)
-#define TDMA_ENABLED 0
-#define TDMA_NUM_TRACKERS 10
-#define TDMA_SLOT_TICKS    18  /* ~550μs at 32768Hz */
-#define TDMA_FRAME_TICKS   (TDMA_SLOT_TICKS * TDMA_NUM_TRACKERS)  /* 180 ticks ≈ 5.5ms */
+// TDMA parameters — now dynamically computed based on active tracker count.
+// The receiver periodically scans for active trackers and packs per-tracker
+// TDMA config (slot index, total slots, slot ticks, epoch) into a volatile
+// uint32_t that the RADIO ISR reads atomically when constructing PONG packets.
+#define TDMA_ENABLED 1
+#define TDMA_MIN_SLOT_TICKS   14  /* minimum slot width (~427μs at 32768Hz) */
+#define TDMA_MAX_TPS_TARGET  200  /* max TPS per tracker */
+#define TDMA_TOLERANCE_TICKS   3  /* slot violation tolerance band */
+
+// Dynamic TDMA config packed into uint32_t for atomic ISR access (ARM Cortex-M).
+// Layout: [31:24]=assigned_slot, [23:16]=total_slots, [15:8]=slot_ticks, [7:0]=epoch
+static volatile uint32_t tdma_config_packed[MAX_TRACKERS];
+static uint8_t tdma_config_epoch;           // wrapping counter, incremented on each recalc
+static uint8_t tdma_dynamic_active_count;   // current number of active trackers
+static uint8_t tdma_dynamic_slot_ticks;     // current slot width in ticks
+static uint32_t tdma_active_mask;           // bitmask of active trackers (for change detection)
+
+static inline uint32_t tdma_pack_config(uint8_t slot, uint8_t total, uint8_t slot_ticks, uint8_t epoch)
+{
+	return ((uint32_t)slot << 24) | ((uint32_t)total << 16)
+	     | ((uint32_t)slot_ticks << 8) | (uint32_t)epoch;
+}
+
+/* Forward declaration — defined after last_ping_time / PING_TIMEOUT_MS */
+static void tdma_recalculate(void);
 
 static struct esb_payload rx_payload;
 // static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
@@ -76,6 +96,81 @@ static volatile int16_t pending_sens_data[MAX_TRACKERS][3];   // SENS_SET sensit
 static uint8_t receiver_rf_channel = 0xFF; // Current RF channel of the receiver, 0xFF indicates using default value
 
 #define PING_TIMEOUT_MS 5000 // PING timeout threshold: 5 seconds
+
+/**
+ * Recalculate dynamic TDMA parameters based on active trackers.
+ * Called periodically from esb_stats_thread (non-ISR context).
+ */
+static void tdma_recalculate(void)
+{
+	uint64_t now = k_uptime_get();
+	uint8_t active_ids[MAX_TRACKERS];
+	uint8_t active_count = 0;
+	uint32_t new_mask = 0;
+
+	/* Scan for active trackers (received PING within timeout) */
+	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
+		if (last_ping_time[i] > 0 &&
+		    (now - last_ping_time[i]) <= PING_TIMEOUT_MS) {
+			active_ids[active_count++] = i;
+			new_mask |= (1U << i);
+		}
+	}
+
+	/* Skip update if active set hasn't changed */
+	if (new_mask == tdma_active_mask && active_count == tdma_dynamic_active_count) {
+		return;
+	}
+
+	/* active_ids is already sorted (ascending) since we iterate 0..N */
+
+	uint8_t slot_ticks;
+	if (active_count <= 1) {
+		/* Single tracker or none: use wide slot, effectively no contention */
+		slot_ticks = TDMA_MIN_SLOT_TICKS;
+		if (active_count == 1) {
+			/* slot_ticks = 32768/200 = 163, but cap to keep frame short */
+			slot_ticks = 163;
+		}
+	} else {
+		/* slot_ticks = ceil(32768 / (200 * active_count)) */
+		uint32_t numerator = 32768;
+		uint32_t denominator = TDMA_MAX_TPS_TARGET * active_count;
+		slot_ticks = (uint8_t)((numerator + denominator - 1) / denominator);
+		if (slot_ticks < TDMA_MIN_SLOT_TICKS) {
+			slot_ticks = TDMA_MIN_SLOT_TICKS;
+		}
+	}
+
+	tdma_config_epoch++;
+	uint8_t epoch = tdma_config_epoch;
+
+	/* Pack config for each active tracker */
+	for (uint8_t s = 0; s < active_count; s++) {
+		uint8_t tid = active_ids[s];
+		tdma_config_packed[tid] = tdma_pack_config(s, active_count, slot_ticks, epoch);
+	}
+
+	/* Mark inactive trackers as unassigned */
+	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+		if (!(new_mask & (1U << i))) {
+			tdma_config_packed[i] = tdma_pack_config(0xFF, active_count, slot_ticks, epoch);
+		}
+	}
+
+	uint8_t old_count = tdma_dynamic_active_count;
+	uint8_t old_slot = tdma_dynamic_slot_ticks;
+	tdma_dynamic_active_count = active_count;
+	tdma_dynamic_slot_ticks = slot_ticks;
+	tdma_active_mask = new_mask;
+
+	if (active_count != old_count || slot_ticks != old_slot) {
+		uint32_t frame_ticks = (uint32_t)slot_ticks * active_count;
+		uint32_t est_tps = frame_ticks > 0 ? 32768 / frame_ticks : 0;
+		LOG_INF("TDMA reconfig: %u active, slot=%u ticks, frame=%u ticks, ~%u TPS/trk (epoch=%u)",
+			active_count, slot_ticks, frame_ticks, est_tps, epoch);
+	}
+}
 
 // Channel change confirmation tracking
 static atomic_t channel_change_pending = ATOMIC_INIT(0); // Indicates if a channel change is pending
@@ -175,19 +270,11 @@ static volatile uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS] = {0};
 static volatile bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS] = {false};
 
 #if TDMA_ENABLED
-/*
- * Tolerance band for TDMA violation detection.
- * Packets within TDMA_TOLERANCE_TICKS of their slot boundary (either side)
- * are not counted as violations.  This absorbs EVENT_IRQ scheduling jitter
- * (~2-5 ticks) and k_sleep() rounding on the tracker side.
- */
-#define TDMA_TOLERANCE_TICKS 3
-
 /**
  * Check if a packet from a tracker arrived in its assigned TDMA slot.
- * Updates statistics for diagnostics.
+ * Uses dynamic parameters from tdma_config_packed[].
  *
- * @param tracker_id   The tracker's ID (0-9)
+ * @param tracker_id   The tracker's ID (0-15)
  * @param rx_ticks     Receiver time in ticks when packet arrived
  */
 static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
@@ -196,17 +283,21 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
 		return;
 	}
 
-	/* Calculate which slot this tracker should use */
-	uint8_t expected_slot = tracker_id % TDMA_NUM_TRACKERS;
+	/* Read dynamic TDMA config (atomic 32-bit load) */
+	uint32_t cfg = tdma_config_packed[tracker_id];
+	uint8_t expected_slot = (cfg >> 24) & 0xFF;
+	uint8_t total_slots   = (cfg >> 16) & 0xFF;
+	uint8_t slot_ticks    = (cfg >> 8) & 0xFF;
+
+	/* Skip validation if tracker has no slot assignment or config invalid */
+	if (expected_slot == 0xFF || total_slots == 0 || slot_ticks == 0) {
+		return;
+	}
+
+	uint32_t frame_ticks = (uint32_t)slot_ticks * total_slots;
 
 	/*
 	 * Compensate receiver clock vs tracker clock offset.
-	 *
-	 * g_last_ping_rx_time_diff_ticks[id] = rx_ticks_at_ping - tracker_estimated_rx_ticks
-	 * This is the systematic bias between receiver time and tracker's view of
-	 * receiver time.  Subtracting it converts the receiver timestamp to the
-	 * same reference frame the tracker used when scheduling its transmission,
-	 * making TDMA slot assignment meaningful.
 	 */
 	int32_t clock_bias = g_last_ping_rx_time_diff_valid[tracker_id]
 		? g_last_ping_rx_time_diff_ticks[tracker_id]
@@ -214,24 +305,19 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
 	uint32_t adjusted_rx_ticks = (uint32_t)((int32_t)rx_ticks - clock_bias);
 
 	/* Calculate current position in the TDMA frame (tracker-relative) */
-	uint32_t frame_phase = adjusted_rx_ticks % TDMA_FRAME_TICKS;
+	uint32_t frame_phase = adjusted_rx_ticks % frame_ticks;
 
 	/*
 	 * Offset relative to the CENTER of this tracker's assigned slot.
-	 * Center = expected_slot * TDMA_SLOT_TICKS + TDMA_SLOT_TICKS / 2
-	 *
-	 * Normalize to [-FRAME_TICKS/2, FRAME_TICKS/2] to handle
-	 * frame boundary wrap-around correctly (e.g. slot 0 packet arriving
-	 * 1 tick early should be -1, not +179).
+	 * Normalize to [-frame_ticks/2, frame_ticks/2] for wrap-around.
 	 */
-	int32_t slot_center = (int32_t)(expected_slot * TDMA_SLOT_TICKS + TDMA_SLOT_TICKS / 2);
+	int32_t slot_center = (int32_t)(expected_slot * slot_ticks + slot_ticks / 2);
 	int32_t ref_offset = (int32_t)frame_phase - slot_center;
 
-	/* Normalize wrap-around: bring ref_offset into [-FRAME/2, FRAME/2] */
-	if (ref_offset > (int32_t)(TDMA_FRAME_TICKS / 2)) {
-		ref_offset -= TDMA_FRAME_TICKS;
-	} else if (ref_offset < -(int32_t)(TDMA_FRAME_TICKS / 2)) {
-		ref_offset += TDMA_FRAME_TICKS;
+	if (ref_offset > (int32_t)(frame_ticks / 2)) {
+		ref_offset -= frame_ticks;
+	} else if (ref_offset < -(int32_t)(frame_ticks / 2)) {
+		ref_offset += frame_ticks;
 	}
 
 	/* Update statistics */
@@ -252,23 +338,17 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
 		}
 	}
 
-	/*
-	 * Check for slot violation with tolerance band.
-	 * A packet is in-slot if ref_offset (from center) is within
-	 * [-SLOT/2 - TOLERANCE, +SLOT/2 + TOLERANCE], i.e. abs(ref_offset)
-	 * is at most SLOT/2 + TOLERANCE.
-	 */
-	int32_t half_slot = (int32_t)(TDMA_SLOT_TICKS / 2);
+	int32_t half_slot = (int32_t)(slot_ticks / 2);
 	int32_t abs_offset = ref_offset < 0 ? -ref_offset : ref_offset;
 	if (abs_offset > half_slot + TDMA_TOLERANCE_TICKS) {
 		stats->violations++;
 
-		/* Rate-limit per tracker to avoid flooding logs */
 		if ((stats->violations & 0x0F) == 1) {
 			LOG_DBG(
-				"TDMA viol trk=%u exp_slot=%u phase=%u off=%d bias=%d",
+				"TDMA viol trk=%u exp_slot=%u/%u phase=%u off=%d bias=%d",
 				tracker_id,
 				expected_slot,
+				total_slots,
 				frame_phase,
 				ref_offset,
 				clock_bias
@@ -561,6 +641,9 @@ static void esb_stats_thread(void)
 			}
 			LOG_INF("Total TPS: %u", total_tps);
 			last_tps_print_time = now;
+
+			/* Recalculate dynamic TDMA config every TPS print cycle (~1s) */
+			tdma_recalculate();
 		}
 
 		// Print detailed stats only when enabled
@@ -657,16 +740,13 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 				ack_payload->data[10] = (ch >> 8) & 0xFF;
 				ack_payload->data[11] = (ch) & 0xFF;
 			} else if (cmd == ESB_PONG_FLAG_NORMAL) {
-				/* ticks_diff for clock skew compensation */
-				uint32_t est = ((uint32_t)pdu_data[3] << 24)
-					     | ((uint32_t)pdu_data[4] << 16)
-					     | ((uint32_t)pdu_data[5] << 8)
-					     | ((uint32_t)pdu_data[6]);
-				int32_t diff = (int32_t)(rx_ticks - est);
-				ack_payload->data[8] = (diff >> 24) & 0xFF;
-				ack_payload->data[9] = (diff >> 16) & 0xFF;
-				ack_payload->data[10] = (diff >> 8) & 0xFF;
-				ack_payload->data[11] = (diff) & 0xFF;
+				/* Piggyback dynamic TDMA config in bytes 8-11.
+				 * Atomic 32-bit read on ARM Cortex-M — ISR safe. */
+				uint32_t cfg = tdma_config_packed[tracker_id];
+				ack_payload->data[8]  = (cfg >> 24) & 0xFF; /* assigned_slot */
+				ack_payload->data[9]  = (cfg >> 16) & 0xFF; /* total_slots */
+				ack_payload->data[10] = (cfg >> 8) & 0xFF;  /* slot_ticks */
+				ack_payload->data[11] = (cfg) & 0xFF;       /* config_epoch */
 			} else {
 				memset(&ack_payload->data[8], 0, 4);
 			}
@@ -894,7 +974,7 @@ void event_handler(struct esb_evt const *event)
 						}
 
 #if TDMA_ENABLED
-						if (stats->violations > 2) {
+						if (stats->violations > 12 && esb_get_stats_detailed_enabled()) {
 							LOG_WRN(
 								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld ticks StdDev=%u ticks Range=[%d, %d] "
 								"RxTimeDiff=%s%llu us",
