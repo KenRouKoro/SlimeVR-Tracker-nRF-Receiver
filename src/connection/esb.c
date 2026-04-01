@@ -1506,20 +1506,20 @@ int esb_initialize(bool tx)
 	if (!err) {
 		// Use saved channel if available, otherwise use default
 		uint8_t channel_to_use = (receiver_rf_channel <= 100) ? receiver_rf_channel : RADIO_RF_CHANNEL;
-		esb_set_rf_channel(channel_to_use);
+		err = esb_set_rf_channel(channel_to_use);
 		LOG_INF("Set RF channel to %u", channel_to_use);
 	}
 
 	if (!err) {
-		esb_set_base_address_0(base_addr_0);
+		err = esb_set_base_address_0(base_addr_0);
 	}
 
 	if (!err) {
-		esb_set_base_address_1(base_addr_1);
+		err = esb_set_base_address_1(base_addr_1);
 	}
 
 	if (!err) {
-		esb_set_prefixes(addr_prefix, ARRAY_SIZE(addr_prefix));
+		err = esb_set_prefixes(addr_prefix, ARRAY_SIZE(addr_prefix));
 	}
 
 	if (err) {
