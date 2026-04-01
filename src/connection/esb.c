@@ -68,7 +68,6 @@ static void tdma_recalculate(void);
 static struct esb_payload rx_payload;
 // static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
 //														  0, 0, 0, 0, 0, 0, 0, 0);
-static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0, 0, 0, 0, 0);
 // static struct esb_payload tx_payload_timer = ESB_CREATE_PAYLOAD(0,
 //														  0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 // 0, 0, 0, 0, 0, 0, 0);
@@ -695,8 +694,74 @@ static void esb_stats_thread(void)
  * -------------------------------------------------------------------------*/
 static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 				uint32_t pipe_id, struct esb_payload *ack_payload,
-				bool *has_ack_payload)
+				bool *has_ack_payload, bool *suppress_ack)
 {
+	*has_ack_payload = false;
+	*suppress_ack = false;
+
+	/* ---- Discovery pairing packets on pipe 0 ---- */
+	if (pipe_id == 0 && data_length == 8) {
+		uint8_t step = pdu_data[1];
+		uint64_t raw_addr = 0;
+		uint64_t found_addr = 0;
+		int known_id = -1;
+		uint8_t checksum = crc8_ccitt(0x07, &pdu_data[2], 6);
+
+		if (checksum == 0) {
+			checksum = 8;
+		}
+
+		memcpy(&raw_addr, pdu_data, sizeof(raw_addr));
+		found_addr = (raw_addr >> 16) & 0xFFFFFFFFFFFFULL;
+
+		if (checksum != pdu_data[0] || found_addr == 0) {
+			*suppress_ack = true;
+			return;
+		}
+
+		known_id = esb_find_tracker(found_addr);
+
+		if (!esb_pairing) {
+			*suppress_ack = true;
+			return;
+		}
+
+		if (pairing_new_devices_blocked && known_id < 0) {
+			*suppress_ack = true;
+			return;
+		}
+
+		if (step == 0) {
+			return;
+		}
+
+		if (step == 1) {
+			if (known_id < 0) {
+				*suppress_ack = true;
+				return;
+			}
+
+			ack_payload->pipe = pipe_id;
+			ack_payload->length = 8;
+			ack_payload->noack = false;
+			ack_payload->data[0] = checksum;
+			ack_payload->data[1] = (uint8_t)known_id;
+			memcpy(&ack_payload->data[2], receiver_device_addr, 6);
+			*has_ack_payload = true;
+			return;
+		}
+
+		if (step == 2) {
+			if (known_id < 0) {
+				*suppress_ack = true;
+			}
+			return;
+		}
+
+		*suppress_ack = true;
+		return;
+	}
+
 	/* ---- PING → PONG (immediate response) ---- */
 	if (data_length == ESB_PING_LEN && pdu_data[0] == ESB_PING_TYPE) {
 		uint8_t tracker_id = pdu_data[1];
@@ -767,35 +832,6 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 
 		ack_payload->data[ESB_PONG_LEN - 1] =
 			crc8_ccitt(0x07, ack_payload->data, ESB_PONG_LEN - 1);
-		*has_ack_payload = true;
-		return;
-	}
-
-	/* ---- Pairing response (on step 1, when tracker expects ACK) ---- */
-	if (data_length == 8 && pdu_data[1] == 1) {
-		uint64_t raw_addr = 0;
-
-		memcpy(&raw_addr, pdu_data, sizeof(raw_addr));
-		uint64_t found_addr = (raw_addr >> 16) & 0xFFFFFFFFFFFFULL;
-		uint8_t checksum = crc8_ccitt(0x07, &pdu_data[2], 6);
-		if (checksum == 0) {
-			checksum = 8;
-		}
-		if (checksum != pdu_data[0] || found_addr == 0) {
-			return;
-		}
-
-		int known_id = esb_find_tracker(found_addr);
-		if (known_id < 0 || !esb_pairing) {
-			return;
-		}
-
-		ack_payload->pipe = pipe_id;
-		ack_payload->length = 8;
-		ack_payload->noack = false;
-		ack_payload->data[0] = checksum;
-		ack_payload->data[1] = (uint8_t)known_id;
-		memcpy(&ack_payload->data[2], receiver_device_addr, 6);
 		*has_ack_payload = true;
 		return;
 	}
@@ -1747,9 +1783,6 @@ static bool esb_parse_pair(const uint8_t packet[8])
 
 	ack_valid = checksum_valid && send_tracker_id < MAX_TRACKERS;
 
-	tx_payload_pair.data[0] = ack_valid ? packet[0] : 0;
-	tx_payload_pair.data[1] = (send_tracker_id < MAX_TRACKERS) ? (uint8_t)send_tracker_id : 0xFF;
-
 	return ack_valid;
 }
 
@@ -1792,8 +1825,7 @@ static void process_pairing_queue(void)
 
 		// Device is now registered — ack_handler will respond on the
 		// next pairing step 1 via esb_find_tracker() lookup.
-		LOG_INF("New device registered: id=%u, ack_handler will respond on next step 1",
-			tx_payload_pair.data[1]);
+		LOG_INF("New device registered, ack_handler will respond on next step 1");
 		set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 	}
 }
@@ -2362,12 +2394,6 @@ static void esb_thread(void)
 	uint64_t *dev_addr = (uint64_t *)NRF_FICR->DEVICEADDR;
 	memcpy(receiver_device_addr, dev_addr, 6);
 	LOG_INF("Receiver address: %012llX", *dev_addr & 0xFFFFFFFFFFFF);
-
-	// Pre-fill tx_payload_pair with receiver address (for thread-side pairing responses)
-	tx_payload_pair.pipe = 0;
-	tx_payload_pair.noack = false;
-	tx_payload_pair.length = 8;
-	memcpy(&tx_payload_pair.data[2], receiver_device_addr, 6);
 
 	// Always start in unified mode: pipe 0 for pairing, pipes 1-7 for data
 	esb_receive();
