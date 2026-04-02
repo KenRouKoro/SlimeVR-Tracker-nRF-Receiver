@@ -117,6 +117,23 @@ uint16_t sent_device_addr = 0;
 bool usb_enabled = false;
 int64_t last_registration_sent = 0;
 
+//|type    |description
+//|TX   255|receiver packet 0, associate id and tracker address
+//|TX   254|device list hash, round trip ping
+//|TX   253|receiver status
+//|TX   252|device pairing request
+//|RX   255|round trip response
+//|RX   254|command
+
+//|b0      |b1      |b2      |b3      |b4      |b5      |b6      |b7      |b8      |b9      |b10     |b11     |b12     |b13     |b14     |b15     |
+//|type    |data                                                                                                                                  |
+//|TX   255|id      |device_addr                                          |resv-------------------------------------------------------------------|
+//|TX   254|stored  |crc                                |latency          |resv-------------------------------------------------------------------|
+//|TX   253|status  |resv-------------------------------------------------|resv-------------------------------------------------------------------|
+//|TX   252|id      |device_addr                                          |resv-------------------------------------------------------------------|
+//|RX   255|resv----------------------------------------------------------|resv-------------------------------------------------------------------|
+//|RX   254|command |resv-------------------------------------------------|resv-------------------------------------------------------------------|
+
 static void packet_device_addr(uint8_t *report, uint16_t id) // associate id and tracker address
 {
 	report[0] = 255; // receiver packet 0
@@ -515,6 +532,27 @@ void usb_init_thread(void)
 }
 
 K_THREAD_DEFINE(usb_init_thread_id, 256, usb_init_thread, NULL, NULL, NULL, 6, 0, 0);
+
+//|type    |description
+//|RX     0|device info ("info")
+//|RX     1|full precision quat and accel
+//|RX     2|reduced precision quat and accel with battery, temp, and rssi ("info")
+//|RX     3|status ("status")
+//|RX     4|full precision quat and magnetometer
+//|RX     5|runtime ("status2")
+//|RX     6|reduced precision quat and accel with button and sleep time ("info2")
+//|RX     7|button and sleep time ("info2")
+
+//|b0      |b1      |b2      |b3      |b4      |b5      |b6      |b7      |b8      |b9      |b10     |b11     |b12     |b13     |b14     |b15     |
+//|type    |id      |packet data                                                                                                                  |
+//|RX     0|id      |batt    |batt_v  |temp    |brd_id  |mcu_id  |resv----|imu_id  |mag_id  |fw_date          |major   |minor   |patch   |rssi    |
+//|RX     1|id      |q0               |q1               |q2               |q3               |a0               |a1               |a2               |
+//|RX     2|id      |batt    |batt_v  |temp    |q_buf                              |a0               |a1               |a2               |rssi    |
+//|RX     3|id      |svr_stat|status  |resv----------------------------------------------------------------------------------------------|rssi    |
+//|RX     4|id      |q0               |q1               |q2               |q3               |m0               |m1               |m2               |
+//|RX     5|id      |runtime                                                                |resv----------------------------------------|rssi    |
+//|RX     6|id      |button  |sleeptime        |resv-------------------------------------------------------------------------------------|rssi    |
+//|RX     7|id      |button  |sleeptime        |q_buf                              |a0               |a1               |a2               |rssi    |
 
 // Per-tracker FIFO drop tracking for detailed diagnostics
 static uint32_t tracker_drops[MAX_TRACKERS] = {0};

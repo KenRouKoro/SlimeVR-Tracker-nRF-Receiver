@@ -35,6 +35,36 @@
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
+//|type    |description
+//|RX  CRC8|pairing
+//|TX  CRC8|pairing
+
+//|b0      |b1      |b2      |b3      |b4      |b5      |b6      |b7      |b8      |b9      |b10     |b11     |b12     |b13     |b14     |b15     |
+//|type    |data                                                                                                                                  |
+//|RX  CRC8|ack     |device_addr                                          |-
+//|TX  CRC8|ack     |recv_addr                                            |-
+
+//|packet  |description
+//|RX     1|request from tracker
+//|TX     2|pairing accepted from dongle
+//|TX     3|Dongle State
+//|TX     4|No Windows
+//|TX     5|Window Info
+
+//|packet  |b0      |b1      |b2      |b3      |b4      |b5      |b6      |b7      |b8      |b9      |b10     |b11     |b12     |b13     |b14     |b15     |
+//|RX     1|    0xCD|    0x01|    0x00|Tracker Hardware ID                                  |Tracker Hardware ID                                  |-
+//|TX     2|    0xCD|    0x02|Trckr ID|Dongle Hardware ID                                   |Tracker Hardware ID                                  |-
+//|TX     3|    0xCD|    0x03|Dongle Hardware ID                                   |state   |channel |-
+//|TX     4|    0xCD|    0x04|-
+//|TX     5|    0xCD|    0x05|Window  |Timer                              |Packet  |-
+
+// packet 3:
+// state field bits: 9[0:0]: Accepts new trackers?; 9[1:1]: Force pair
+// channel bundle field bits: 10[0:3]: Channels bundle; 10[4:7]: Next channel offset
+// packet 5:
+// Packet: Packet Number
+
+
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 #define PAIRING_TIMEOUT_SECONDS CONFIG_PAIRING_TIMEOUT
