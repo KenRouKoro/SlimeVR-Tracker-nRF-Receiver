@@ -1971,6 +1971,9 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 		case ESB_PONG_FLAG_DFU:
 			cmd_name = "DFU";
 			break;
+		case ESB_PONG_FLAG_DFU_OTA:
+			cmd_name = "DFU_OTA";
+			break;
 		case ESB_PONG_FLAG_SET_CHANNEL:
 			cmd_name = "SET_CHANNEL";
 			break;
@@ -2079,6 +2082,9 @@ void esb_send_remote_command_all(uint8_t command_flag)
 		break;
 	case ESB_PONG_FLAG_DFU:
 		cmd_name = "DFU";
+		break;
+	case ESB_PONG_FLAG_DFU_OTA:
+		cmd_name = "DFU_OTA";
 		break;
 	case ESB_PONG_FLAG_SET_CHANNEL:
 		cmd_name = "SET_CHANNEL";
@@ -2500,4 +2506,3 @@ static void esb_thread(void)
 		k_msleep(100);
 	}
 }
-

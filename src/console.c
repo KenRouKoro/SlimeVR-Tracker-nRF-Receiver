@@ -52,6 +52,8 @@ K_THREAD_DEFINE(console_thread_id, 1024, console_thread, NULL, NULL, NULL, 6, 0,
 #define DFU_EXISTS CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
 #define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
 #define NRF5_BOOTLOADER CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+#define ADAFRUIT_DFU_MAGIC_UF2_RESET 0x57
+#define ADAFRUIT_DFU_MAGIC_OTA_RESET 0xA8
 
 #if NRF5_BOOTLOADER
 static const struct device *gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
@@ -72,6 +74,22 @@ static void skip_dfu(void)
 #if DFU_EXISTS                            // Using Adafruit bootloader
 	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
 	ram_range_retain(dbl_reset_mem, sizeof(dbl_reset_mem), true);
+#endif
+}
+
+static void request_local_dfu(bool ota)
+{
+#if ADAFRUIT_BOOTLOADER
+	NRF_POWER->GPREGRET = ota ? ADAFRUIT_DFU_MAGIC_OTA_RESET : ADAFRUIT_DFU_MAGIC_UF2_RESET;
+	k_msleep(100);
+	sys_reboot(SYS_REBOOT_COLD);
+#elif NRF5_BOOTLOADER
+	ARG_UNUSED(ota);
+	gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
+	k_msleep(100);
+	sys_reboot(SYS_REBOOT_COLD);
+#else
+	ARG_UNUSED(ota);
 #endif
 }
 
@@ -178,7 +196,7 @@ static void print_help(void)
 		"Remote Commands:\n"
 		"  send <id|all> <command>    Send remote command to tracker(s)\n"
 		"    Commands: shutdown, calibrate, 6-side, meow, scan,\n"
-		"              mag <on|off|clear|cal>, reboot, clear, dfu,\n"
+		"              mag <on|off|clear|cal>, reboot, clear, dfu [ota],\n"
 		"              channel <1-100>, clearchannel,\n"
 		"              sens <x,y,z|reset>, reset <zro|acc|bat|mag|tcal|fusion>, ping\n"
 	);
@@ -197,7 +215,8 @@ static void print_help(void)
 
 	printk(
 		"      send 3 clear             Clear pairing on tracker 3\n"
-		"      send all dfu             Enter DFU mode on all trackers\n"
+		"      send all dfu             Enter UF2 DFU mode on all trackers\n"
+		"      send all dfu ota         Enter OTA DFU mode on all trackers\n"
 		"      send all channel 25      Set all trackers to channel 25\n"
 		"      send all clearchannel    Clear channel for all trackers\n"
 		"\n"
@@ -206,7 +225,7 @@ static void print_help(void)
 #if DFU_EXISTS
 	printk(
 		"Bootloader:\n"
-		"  dfu                        Enter DFU bootloader\n"
+		"  dfu [ota]                  Enter DFU bootloader (default UF2, optional OTA)\n"
 		"\n"
 	);
 #endif
@@ -246,9 +265,7 @@ static void console_thread(void)
 	if (button_read()) // button held on usb connect, enter DFU
 	{
 #if ADAFRUIT_BOOTLOADER
-		NRF_POWER->GPREGRET = 0x57;
-		k_msleep(100); // Wait for register to be written
-		sys_reboot(SYS_REBOOT_COLD);
+		request_local_dfu(false);
 #endif
 #if NRF5_BOOTLOADER
 		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
@@ -589,8 +606,16 @@ static void console_thread(void)
 					cmd_flag = ESB_PONG_FLAG_CLEAR;
 					cmd_name = "Clear pairing";
 				} else if (strcmp(arg2, "dfu") == 0) {
-					cmd_flag = ESB_PONG_FLAG_DFU;
-					cmd_name = "DFU mode";
+					if (arg3 && strcmp(arg3, "ota") == 0) {
+						cmd_flag = ESB_PONG_FLAG_DFU_OTA;
+						cmd_name = "OTA DFU mode";
+					} else if (!arg3) {
+						cmd_flag = ESB_PONG_FLAG_DFU;
+						cmd_name = "UF2 DFU mode";
+					} else {
+						printk("Unknown dfu subcommand: %s (use 'ota' or omit it)\n", arg3);
+						continue;
+					}
 				} else if (strcmp(arg2, "fusion") == 0) {
 					cmd_flag = ESB_PONG_FLAG_FUSION_RESET;
 					cmd_name = "Fusion reset";
@@ -915,7 +940,7 @@ static void console_thread(void)
 				} else {
 					printk("Unknown command: %s\n", arg2);
 					printk(
-						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, fusion, sens, "
+						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu [ota], fusion, sens, "
 						"reset, ping, tcal, tdma, test\n"
 					);
 				}
@@ -923,16 +948,16 @@ static void console_thread(void)
 		}
 #if DFU_EXISTS
 		else if (memcmp(line, command_dfu, sizeof(command_dfu)) == 0) {
-#if ADAFRUIT_BOOTLOADER
-			NRF_POWER->GPREGRET = 0x57;
-			k_msleep(100); // Wait for register to be written
-			sys_reboot(SYS_REBOOT_COLD);
-#endif
-#if NRF5_BOOTLOADER
-			gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
-			k_msleep(100); // Wait for GPIO to be configured
-			sys_reboot(SYS_REBOOT_COLD);
-#endif
+			bool ota = false;
+			if (arg) {
+				if (strcmp((char *)arg, "ota") == 0) {
+					ota = true;
+				} else {
+					printk("Unknown dfu argument: %s (use 'ota' or omit it)\n", arg);
+					continue;
+				}
+			}
+			request_local_dfu(ota);
 		}
 #endif
 		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) {
