@@ -73,12 +73,20 @@ config RADIO_RETRANSMIT_DELAY
         Radio retransmit delay.
 
 config PAIRING_TIMEOUT
-    int "Pairing mode timeout (seconds)"
-    default 300
-    help
-        Timeout for pairing mode in seconds.
-        After this time, pairing mode will automatically exit.
-        Default is 300 seconds (5 minutes).
-        Set to 0 to disable timeout.
+	int "Pairing mode timeout (seconds)"
+	default 300
+	help
+	  Timeout for pairing mode in seconds.
+	  After this time, pairing mode will automatically exit.
+	  Default is 300 seconds (5 minutes).
+	  Set to 0 to disable timeout.
 
 source "Kconfig.zephyr"
+
+config SLIMENRF_USB_BUILD_INFO_HID
+	bool "USB HID build metadata (Feature report on second HID interface)"
+	default n
+	depends on USB_DEVICE_STACK && USB_DEVICE_HID
+	help
+	  Exposes struct usb_build_info_v1 via HID GET_REPORT (Feature) on HID_1.
+	  Requires CONFIG_USB_HID_DEVICE_COUNT >= 2 in prj.conf (or board config).

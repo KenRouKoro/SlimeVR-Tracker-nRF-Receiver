@@ -7,3 +7,6 @@
 .cache
 compile_commands.json
 .idea
+
+.cursor/
+docs/
