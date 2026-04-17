@@ -87,6 +87,8 @@ config SLIMENRF_USB_BUILD_INFO_HID
 	bool "USB HID build metadata (Feature report on second HID interface)"
 	default n
 	depends on USB_DEVICE_STACK && USB_DEVICE_HID
+	select JSON_LIBRARY if ENABLE_HID_INT_OUT_EP
 	help
 	  Exposes struct usb_build_info_v1 via HID GET_REPORT (Feature) on HID_1.
 	  Requires CONFIG_USB_HID_DEVICE_COUNT >= 2 in prj.conf (or board config).
+	  When interrupt OUT is enabled, the HID_1 command channel uses JSON (Zephyr JSON library).

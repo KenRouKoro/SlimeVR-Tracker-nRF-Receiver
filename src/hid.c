@@ -29,6 +29,10 @@
 #include <zephyr/usb/usb_device.h>
 #include <zephyr/usb/class/usb_hid.h>
 
+#if IS_ENABLED(CONFIG_SLIMENRF_USB_BUILD_INFO_HID) && IS_ENABLED(CONFIG_ENABLE_HID_INT_OUT_EP)
+void slime_usb_hid_cmd_usb_configured(void);
+#endif
+
 static struct k_work report_send;
 
 static struct tracker_report {
@@ -356,6 +360,16 @@ static void int_in_ready_cb(const struct device *dev)
 	}
 }
 
+#if IS_ENABLED(CONFIG_ENABLE_HID_INT_OUT_EP)
+static void int_out_ready_discard_cb(const struct device *dev)
+{
+	uint8_t buf[CONFIG_HID_INTERRUPT_EP_MPS];
+	uint32_t br;
+
+	(void)hid_int_ep_read(dev, buf, sizeof(buf), &br);
+}
+#endif
+
 /*
  * On Idle callback is available here as an example even if actual use is
  * very limited. In contrast to report_event_handler(),
@@ -381,6 +395,9 @@ static void protocol_cb(const struct device *dev, uint8_t protocol)
 
 static const struct hid_ops ops = {
 	.int_in_ready = int_in_ready_cb,
+#if IS_ENABLED(CONFIG_ENABLE_HID_INT_OUT_EP)
+	.int_out_ready = int_out_ready_discard_cb,
+#endif
 	.on_idle = on_idle_cb,
 	.protocol_change = protocol_cb,
 };
@@ -391,18 +408,21 @@ static void status_cb(enum usb_dc_status_code status, const uint8_t *param)
 	case USB_DC_RESET:
 		configured = false;
 		break;
-	case USB_DC_CONFIGURED:
+	case USB_DC_CONFIGURED: {
 		int configurationIndex = *param;
-		if(configurationIndex == 0) {
-			// from usb_device.c: A configuration index of 0 unconfigures the device.
+		if (configurationIndex == 0) {
+			/* from usb_device.c: A configuration index of 0 unconfigures the device. */
 			configured = false;
 		} else {
 			if (!configured) {
 				int_in_ready_cb(hdev);
 				configured = true;
 			}
+#if IS_ENABLED(CONFIG_SLIMENRF_USB_BUILD_INFO_HID) && IS_ENABLED(CONFIG_ENABLE_HID_INT_OUT_EP)
+			slime_usb_hid_cmd_usb_configured();
+#endif
 		}
-		break;
+	} break;
 	case USB_DC_SOF:
 		break;
 	default:

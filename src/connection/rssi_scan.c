@@ -6,11 +6,11 @@
 #include "connection/rssi_scan.h"
 
 #include "connection/esb.h"
+#include "console_cmd.h"
 
 #include <esb.h>
 
 #include <zephyr/kernel.h>
-#include <zephyr/sys/printk.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -158,7 +158,7 @@ void rssi_scan_run_and_print(void)
 	// but keeping it explicit makes the scan less fragile.
 	(void)clocks_start();
 
-	printk(
+	console_cmd_print(
 		"RSSI scan (ESB channels %u..%u): samples/ch/sweep=%u, sweeps=%d (total=%u samples/ch)\n",
 		RSSI_SCAN_FIRST_CHANNEL,
 		RSSI_SCAN_LAST_CHANNEL,
@@ -225,8 +225,8 @@ void rssi_scan_run_and_print(void)
 		}
 	}
 
-	printk("Current channel (effective): %u\n", current_ch);
-	printk(
+	console_cmd_print("Current channel (effective): %u\n", current_ch);
+	console_cmd_print(
 		"Recommended: channel %u (-%d dBm)\n\n",
 		recommended,
 		score_lowest[recommended]
@@ -257,16 +257,16 @@ void rssi_scan_run_and_print(void)
 
 	// Print all channels in compact table format
 	// Format: "CH(WST)" where WST is lowest (min across all samples).
-	printk("All channels sorted by RSSI (lower is better):\n");
+	console_cmd_print("All channels sorted by RSSI (lower is better):\n");
 	enum { PER_LINE = 8 };
 	for (int i = 0; i < NUM_CH; i++) {
 		uint8_t ch = sorted_ch[i];
-		printk("%3u (-%2d dBm)", ch, score_lowest[ch]);
+		console_cmd_print("%3u (-%2d dBm)", ch, score_lowest[ch]);
 		if ((i + 1) % PER_LINE == 0 || i == NUM_CH - 1) {
-			printk("\n");
+			console_cmd_print("\n");
 			k_msleep(20);
 		} else {
-			printk("  ");
+			console_cmd_print("  ");
 		}
 	}
 
