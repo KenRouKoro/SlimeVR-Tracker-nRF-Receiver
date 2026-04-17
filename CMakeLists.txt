@@ -75,6 +75,10 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(NONE)
 
 FILE(GLOB_RECURSE app_sources src/*.c)
+# Conditionally exclude data_collect.c when DATA_COLLECT is not enabled
+if(NOT CONFIG_DATA_COLLECT)
+  list(FILTER app_sources EXCLUDE REGEX ".*data_collect\\.c$")
+endif()
 # NORDIC SDK APP START
 target_sources(app PRIVATE ${app_sources})
 # NORDIC SDK APP END

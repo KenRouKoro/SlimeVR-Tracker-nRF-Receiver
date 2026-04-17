@@ -81,4 +81,13 @@ config PAIRING_TIMEOUT
         Default is 300 seconds (5 minutes).
         Set to 0 to disable timeout.
 
+config DATA_COLLECT
+    bool "Enable raw sensor data collection interface"
+    default n
+    help
+        Expose a second CDC ACM serial port for streaming raw IMU and
+        magnetometer data from trackers. When disabled, only the
+        console CDC port is available, avoiding user confusion with
+        multiple COM ports.
+
 source "Kconfig.zephyr"

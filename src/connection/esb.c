@@ -30,6 +30,7 @@
 #include "globals.h"
 #include "hid.h"
 #include "system/system.h"
+#include "data_collect.h"
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
@@ -783,6 +784,12 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 		uint8_t counter = pdu_data[2];
 		uint8_t cmd = tracker_remote_command[tracker_id];
 
+		/* In data collection mode, force SHUTDOWN for non-target trackers */
+		if (data_collect_is_active() &&
+		    !data_collect_is_target(tracker_id)) {
+			cmd = ESB_PONG_FLAG_SHUTDOWN;
+		}
+
 		ack_payload->pipe = 1 + (tracker_id % 7);
 		ack_payload->length = ESB_PONG_LEN;
 		ack_payload->noack = false;
@@ -1366,6 +1373,21 @@ void event_handler(struct esb_evt const *event)
 			} break;
 			default:
 			{
+				/* Raw data collection packets (types 0x10-0x12): variable length.
+				 * Forward raw payload to CDC for PC-side data collection. */
+				uint8_t pkt_type = rx_payload.data[0];
+				if (pkt_type == ESB_RAW_IMU_TYPE ||
+				    pkt_type == ESB_RAW_MAG_TYPE ||
+				    pkt_type == ESB_RAW_META_TYPE) {
+					uint8_t tracker_id = rx_payload.data[1];
+					if (tracker_id < stored_trackers &&
+					    data_collect_is_target(tracker_id)) {
+						data_collect_write(rx_payload.data,
+								   rx_payload.length,
+								   rx_payload.rssi);
+					}
+					break;
+				}
 				/* Composite packet (type 0x05): variable length.
 				 * Format: [0x05][tracker_id][sub_count][sub_type0][sub_data0...]...[sequence]
 				 * Each sub-packet: 1 byte type + variable data.
