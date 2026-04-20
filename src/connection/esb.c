@@ -703,6 +703,9 @@ static void esb_stats_thread(void)
  * -------------------------------------------------------------------------*/
 #define RAW_ARQ_MAX_GAPS 4
 #define RAW_ARQ_MARKER   0xAA
+/* Maximum sequence distance before a gap is considered stale and unrecoverable.
+ * Must be <= tracker's ring buffer size (RAW_RING_SIZE = 256). */
+#define RAW_ARQ_STALE_DISTANCE 200
 
 static volatile uint16_t raw_arq_expected_seq;
 static volatile bool     raw_arq_seq_initialized;
@@ -760,6 +763,22 @@ static void raw_arq_process_isr(uint16_t received_seq,
 		/* Large jump — treat as reset/restart */
 		raw_arq_expected_seq = received_seq + 1;
 		raw_arq_gap_count = 0;
+	}
+
+	/* Evict stale gap entries that are too far behind expected_seq.
+	 * These sequences have been overwritten in the tracker's ring buffer
+	 * and can never be retransmitted. Without eviction, stale entries
+	 * permanently occupy queue slots, blocking new gap tracking. */
+	{
+		uint16_t cur_expected = raw_arq_expected_seq;
+		uint8_t write_idx = 0;
+		for (uint8_t i = 0; i < raw_arq_gap_count; i++) {
+			uint16_t age = (uint16_t)(cur_expected - raw_arq_gap_queue[i]);
+			if (age < RAW_ARQ_STALE_DISTANCE) {
+				raw_arq_gap_queue[write_idx++] = raw_arq_gap_queue[i];
+			}
+		}
+		raw_arq_gap_count = write_idx;
 	}
 
 	/* Build ACK payload with pending retransmit requests */
