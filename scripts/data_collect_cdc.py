@@ -202,6 +202,8 @@ def collect(port, output_path, duration=None):
     last_status_samples = 0
     last_rssi = 0
     retransmit_count = 0
+    first_seq = None
+    last_seq = None
 
     # Reorder buffer for ARQ retransmits
     REORDER_BUF_MAX = 64
@@ -243,6 +245,11 @@ def collect(port, output_path, duration=None):
                 s = parse_raw_imu(esb_payload, meta)
                 if s:
                     seq = s["seq"]
+
+                    # Track seq range for loss calculation
+                    if first_seq is None:
+                        first_seq = seq
+                    last_seq = seq
 
                     # Detect late retransmit (behind write cursor)
                     if write_cursor is not None:
@@ -299,9 +306,17 @@ def collect(port, output_path, duration=None):
                 buffered = len(reorder_buf)
                 retx_info = f", Retx: {retransmit_count}" if retransmit_count > 0 else ""
                 buf_info = f", Buf: {buffered}" if buffered > 0 else ""
+                if first_seq is not None and last_seq is not None:
+                    expected = ((last_seq - first_seq) & 0xFFFF) + 1
+                    written = sample_count + buffered
+                    lost = expected - written
+                    loss_pct = lost / expected * 100 if expected > 0 else 0
+                    loss_info = f", Loss: {lost}/{expected} ({loss_pct:.1f}%)"
+                else:
+                    loss_info = ""
                 print(
                     f"\r[{elapsed:.1f}s] Samples: {sample_count} ({rate:.0f}/s)"
-                    f"{retx_info}{buf_info}, RSSI: {last_rssi}   ",
+                    f"{retx_info}{buf_info}{loss_info}, RSSI: {last_rssi}   ",
                     end="",
                     flush=True,
                 )
@@ -328,6 +343,11 @@ def collect(port, output_path, duration=None):
     print(f"  Duration: {elapsed:.1f}s")
     print(f"  Samples: {sample_count} -> {csv_path}")
     print(f"  Retransmits received: {retransmit_count}")
+    if first_seq is not None and last_seq is not None:
+        expected = ((last_seq - first_seq) & 0xFFFF) + 1
+        lost = expected - sample_count
+        loss_pct = lost / expected * 100 if expected > 0 else 0
+        print(f"  Expected: {expected}, Lost: {lost} ({loss_pct:.2f}%)")
     if meta.received:
         # Append duration and actual ODR to metadata
         with open(meta_path, "a") as f:

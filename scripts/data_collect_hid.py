@@ -179,6 +179,8 @@ def collect_hid(output_path, duration=None, device_index=None):
     last_status_samples = 0
     last_rssi = 0
     retransmit_count = 0
+    first_seq = None
+    last_seq = None
 
     # Reorder buffer: holds samples until we can write them in order.
     # Keyed by sequence number; flushed when contiguous run available.
@@ -266,6 +268,11 @@ def collect_hid(output_path, duration=None, device_index=None):
                 if s:
                     seq = s["seq"]
 
+                    # Track seq range for loss calculation
+                    if first_seq is None:
+                        first_seq = seq
+                    last_seq = seq
+
                     # Detect retransmit (seq < write_cursor or already in buffer)
                     if write_cursor is not None:
                         diff = (seq - write_cursor) & 0xFFFF
@@ -315,9 +322,18 @@ def collect_hid(output_path, duration=None, device_index=None):
                 buffered = len(reorder_buf)
                 retx_info = f", Retx: {retransmit_count}" if retransmit_count > 0 else ""
                 buf_info = f", Buf: {buffered}" if buffered > 0 else ""
+                # Calculate loss from seq range vs written samples
+                if first_seq is not None and last_seq is not None:
+                    expected = ((last_seq - first_seq) & 0xFFFF) + 1
+                    written = sample_count + buffered
+                    lost = expected - written
+                    loss_pct = lost / expected * 100 if expected > 0 else 0
+                    loss_info = f", Loss: {lost}/{expected} ({loss_pct:.1f}%)"
+                else:
+                    loss_info = ""
                 print(
                     f"\r[{elapsed:.1f}s] Samples: {sample_count} ({rate:.0f}/s)"
-                    f"{retx_info}{buf_info}, RSSI: {last_rssi}   ",
+                    f"{retx_info}{buf_info}{loss_info}, RSSI: {last_rssi}   ",
                     end="",
                     flush=True,
                 )
@@ -341,6 +357,11 @@ def collect_hid(output_path, duration=None, device_index=None):
     print(f"  Duration: {elapsed:.1f}s")
     print(f"  Samples: {sample_count} -> {csv_path}")
     print(f"  Retransmits received: {retransmit_count}")
+    if first_seq is not None and last_seq is not None:
+        expected = ((last_seq - first_seq) & 0xFFFF) + 1
+        lost = expected - sample_count
+        loss_pct = lost / expected * 100 if expected > 0 else 0
+        print(f"  Expected: {expected}, Lost: {lost} ({loss_pct:.2f}%)")
     if meta.received:
         with open(meta_path, "a", encoding="utf-8") as f:
             f.write(f"duration_s={elapsed:.3f}\n")
