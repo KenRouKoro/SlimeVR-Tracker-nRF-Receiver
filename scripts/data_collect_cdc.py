@@ -202,8 +202,7 @@ def collect(port, output_path, duration=None):
     last_status_samples = 0
     last_rssi = 0
     retransmit_count = 0
-    first_seq = None
-    last_seq = None
+    gap_count = 0  # sequence gaps never filled (actual loss)
 
     # Reorder buffer for ARQ retransmits
     REORDER_BUF_MAX = 64
@@ -246,11 +245,6 @@ def collect(port, output_path, duration=None):
                 if s:
                     seq = s["seq"]
 
-                    # Track seq range for loss calculation
-                    if first_seq is None:
-                        first_seq = seq
-                    last_seq = seq
-
                     # Detect late retransmit (behind write cursor)
                     if write_cursor is not None:
                         diff = (seq - write_cursor) & 0xFFFF
@@ -275,9 +269,15 @@ def collect(port, output_path, duration=None):
 
                     reorder_buf[seq] = csv_line
 
+                    # Detect retransmit: packet filling a gap in reorder buffer
                     if (seq - write_cursor) & 0xFFFF > 0 and \
                        (seq - write_cursor) & 0xFFFF < REORDER_BUF_MAX:
-                        retransmit_count += 1
+                        has_later = any(
+                            0 < ((s2 - seq) & 0xFFFF) < REORDER_BUF_MAX
+                            for s2 in reorder_buf if s2 != seq
+                        )
+                        if has_later:
+                            retransmit_count += 1
 
                     # Flush contiguous
                     while write_cursor in reorder_buf:
@@ -287,12 +287,16 @@ def collect(port, output_path, duration=None):
 
                     # Force flush if too many buffered
                     if len(reorder_buf) >= REORDER_BUF_MAX:
-                        for sq in sorted(reorder_buf.keys(),
-                                         key=lambda s: (s - write_cursor) & 0xFFFF):
+                        sorted_seqs = sorted(reorder_buf.keys(),
+                                             key=lambda s: (s - write_cursor) & 0xFFFF)
+                        for sq in sorted_seqs:
+                            gap = (sq - write_cursor) & 0xFFFF
+                            if gap > 0:
+                                gap_count += gap
+                                write_cursor = sq
                             csv_file.write(reorder_buf[sq])
                             sample_count += 1
-                        write_cursor = (max(reorder_buf.keys(),
-                                            key=lambda s: (s - write_cursor) & 0xFFFF) + 1) & 0xFFFF
+                            write_cursor = (write_cursor + 1) & 0xFFFF
                         reorder_buf.clear()
 
             # Flush periodically with status update
@@ -306,14 +310,9 @@ def collect(port, output_path, duration=None):
                 buffered = len(reorder_buf)
                 retx_info = f", Retx: {retransmit_count}" if retransmit_count > 0 else ""
                 buf_info = f", Buf: {buffered}" if buffered > 0 else ""
-                if first_seq is not None and last_seq is not None:
-                    expected = ((last_seq - first_seq) & 0xFFFF) + 1
-                    written = sample_count + buffered
-                    lost = expected - written
-                    loss_pct = lost / expected * 100 if expected > 0 else 0
-                    loss_info = f", Loss: {lost}/{expected} ({loss_pct:.1f}%)"
-                else:
-                    loss_info = ""
+                total = sample_count + gap_count
+                loss_pct = gap_count / total * 100 if total > 0 else 0
+                loss_info = f", Loss: {gap_count} ({loss_pct:.1f}%)" if gap_count > 0 else ""
                 print(
                     f"\r[{elapsed:.1f}s] Samples: {sample_count} ({rate:.0f}/s)"
                     f"{retx_info}{buf_info}{loss_info}, RSSI: {last_rssi}   ",
@@ -331,10 +330,16 @@ def collect(port, output_path, duration=None):
     finally:
         # Flush remaining reorder buffer
         if reorder_buf and write_cursor is not None:
-            for sq in sorted(reorder_buf.keys(),
-                             key=lambda s: (s - write_cursor) & 0xFFFF):
+            sorted_seqs = sorted(reorder_buf.keys(),
+                                 key=lambda s: (s - write_cursor) & 0xFFFF)
+            for sq in sorted_seqs:
+                gap = (sq - write_cursor) & 0xFFFF
+                if gap > 0:
+                    gap_count += gap
+                    write_cursor = sq
                 csv_file.write(reorder_buf[sq])
                 sample_count += 1
+                write_cursor = (write_cursor + 1) & 0xFFFF
             reorder_buf.clear()
         csv_file.close()
 
@@ -343,11 +348,9 @@ def collect(port, output_path, duration=None):
     print(f"  Duration: {elapsed:.1f}s")
     print(f"  Samples: {sample_count} -> {csv_path}")
     print(f"  Retransmits received: {retransmit_count}")
-    if first_seq is not None and last_seq is not None:
-        expected = ((last_seq - first_seq) & 0xFFFF) + 1
-        lost = expected - sample_count
-        loss_pct = lost / expected * 100 if expected > 0 else 0
-        print(f"  Expected: {expected}, Lost: {lost} ({loss_pct:.2f}%)")
+    total = sample_count + gap_count
+    loss_pct = gap_count / total * 100 if total > 0 else 0
+    print(f"  Gaps (lost): {gap_count} ({loss_pct:.2f}%)")
     if meta.received:
         # Append duration and actual ODR to metadata
         with open(meta_path, "a") as f:

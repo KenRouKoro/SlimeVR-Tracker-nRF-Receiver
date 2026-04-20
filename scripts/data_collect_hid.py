@@ -178,9 +178,8 @@ def collect_hid(output_path, duration=None, device_index=None):
     last_status = start_time
     last_status_samples = 0
     last_rssi = 0
-    retransmit_count = 0
-    first_seq = None
-    last_seq = None
+    retransmit_count = 0  # packets that filled a gap in the reorder buffer
+    gap_count = 0  # sequence gaps that were never filled (actual loss)
 
     # Reorder buffer: holds samples until we can write them in order.
     # Keyed by sequence number; flushed when contiguous run available.
@@ -213,16 +212,21 @@ def collect_hid(output_path, duration=None, device_index=None):
 
     def force_flush_reorder_buf():
         """Force-flush oldest samples when buffer is too large."""
-        nonlocal write_cursor, sample_count
+        nonlocal write_cursor, sample_count, gap_count
         if not reorder_buf:
             return
-        # Sort remaining keys and write them all
-        for seq in sorted(reorder_buf.keys(),
-                          key=lambda s: (s - write_cursor) & 0xFFFF):
+        # Sort remaining keys and write them all, counting gaps
+        sorted_seqs = sorted(reorder_buf.keys(),
+                             key=lambda s: (s - write_cursor) & 0xFFFF)
+        for seq in sorted_seqs:
+            # Count gaps between write_cursor and this seq
+            gap = (seq - write_cursor) & 0xFFFF
+            if gap > 0:
+                gap_count += gap
+                write_cursor = seq
             csv_file.write(reorder_buf[seq])
             sample_count += 1
-        write_cursor = (max(reorder_buf.keys(),
-                            key=lambda s: (s - write_cursor) & 0xFFFF) + 1) & 0xFFFF
+            write_cursor = (write_cursor + 1) & 0xFFFF
         reorder_buf.clear()
 
     try:
@@ -268,11 +272,6 @@ def collect_hid(output_path, duration=None, device_index=None):
                 if s:
                     seq = s["seq"]
 
-                    # Track seq range for loss calculation
-                    if first_seq is None:
-                        first_seq = seq
-                    last_seq = seq
-
                     # Detect retransmit (seq < write_cursor or already in buffer)
                     if write_cursor is not None:
                         diff = (seq - write_cursor) & 0xFFFF
@@ -300,10 +299,18 @@ def collect_hid(output_path, duration=None, device_index=None):
 
                     reorder_buf[seq] = csv_line
 
-                    # Check if this was a retransmit filling a gap
+                    # Detect retransmit: a packet that fills a gap
+                    # (write_cursor < seq, but seq is behind some already-buffered seqs)
                     diff = (seq - write_cursor) & 0xFFFF
                     if diff > 0 and diff < REORDER_BUF_MAX:
-                        retransmit_count += 1
+                        # Check if there are buffered seqs ahead of this one
+                        # (meaning this seq was missing and just got retransmitted)
+                        has_later = any(
+                            0 < ((s2 - seq) & 0xFFFF) < REORDER_BUF_MAX
+                            for s2 in reorder_buf if s2 != seq
+                        )
+                        if has_later:
+                            retransmit_count += 1
 
                     # Flush contiguous samples from write cursor
                     flush_reorder_buf()
@@ -322,15 +329,10 @@ def collect_hid(output_path, duration=None, device_index=None):
                 buffered = len(reorder_buf)
                 retx_info = f", Retx: {retransmit_count}" if retransmit_count > 0 else ""
                 buf_info = f", Buf: {buffered}" if buffered > 0 else ""
-                # Calculate loss from seq range vs written samples
-                if first_seq is not None and last_seq is not None:
-                    expected = ((last_seq - first_seq) & 0xFFFF) + 1
-                    written = sample_count + buffered
-                    lost = expected - written
-                    loss_pct = lost / expected * 100 if expected > 0 else 0
-                    loss_info = f", Loss: {lost}/{expected} ({loss_pct:.1f}%)"
-                else:
-                    loss_info = ""
+                # Loss = gaps that were never filled
+                total = sample_count + gap_count
+                loss_pct = gap_count / total * 100 if total > 0 else 0
+                loss_info = f", Loss: {gap_count} ({loss_pct:.1f}%)" if gap_count > 0 else ""
                 print(
                     f"\r[{elapsed:.1f}s] Samples: {sample_count} ({rate:.0f}/s)"
                     f"{retx_info}{buf_info}{loss_info}, RSSI: {last_rssi}   ",
@@ -357,11 +359,9 @@ def collect_hid(output_path, duration=None, device_index=None):
     print(f"  Duration: {elapsed:.1f}s")
     print(f"  Samples: {sample_count} -> {csv_path}")
     print(f"  Retransmits received: {retransmit_count}")
-    if first_seq is not None and last_seq is not None:
-        expected = ((last_seq - first_seq) & 0xFFFF) + 1
-        lost = expected - sample_count
-        loss_pct = lost / expected * 100 if expected > 0 else 0
-        print(f"  Expected: {expected}, Lost: {lost} ({loss_pct:.2f}%)")
+    total = sample_count + gap_count
+    loss_pct = gap_count / total * 100 if total > 0 else 0
+    print(f"  Gaps (lost): {gap_count} ({loss_pct:.2f}%)")
     if meta.received:
         with open(meta_path, "a", encoding="utf-8") as f:
             f.write(f"duration_s={elapsed:.3f}\n")
