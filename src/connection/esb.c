@@ -2516,18 +2516,6 @@ uint8_t esb_get_receiver_channel(void)
 	return receiver_rf_channel;
 }
 
-// TODO:
-void esb_write_sync(uint16_t led_clock)
-{
-	if (!esb_initialized || !esb_paired) {
-		return;
-	}
-	tx_payload_sync.noack = false;
-	tx_payload_sync.data[0] = (led_clock >> 8) & 255;
-	tx_payload_sync.data[1] = led_clock & 255;
-	esb_write_payload(&tx_payload_sync);
-}
-
 // Set up unified addresses: pipe 0 for discovery (pairing), pipes 1-7 for paired data
 void esb_receive(void)
 {
