@@ -85,9 +85,15 @@ config DATA_COLLECT
     bool "Enable raw sensor data collection interface"
     default n
     help
-        Expose a second CDC ACM serial port for streaming raw IMU and
-        magnetometer data from trackers. When disabled, only the
-        console CDC port is available, avoiding user confusion with
-        multiple COM ports.
+        Enable streaming raw IMU and magnetometer data from trackers.
+        Choose HID or CDC transport via DATA_COLLECT_HID.
+
+config DATA_COLLECT_HID
+    bool "Use HID endpoint for data collection (instead of CDC serial)"
+    depends on DATA_COLLECT
+    default y
+    help
+        When enabled, raw data is sent via a dedicated HID endpoint.
+        When disabled, raw data is sent via a second CDC ACM serial port.
 
 source "Kconfig.zephyr"

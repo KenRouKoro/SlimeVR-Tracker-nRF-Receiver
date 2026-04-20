@@ -279,8 +279,8 @@ static void console_thread(void)
 	}
 #endif
 
-	/* Initialize data collection subsystem (but don't activate yet) */
-#ifdef CONFIG_DATA_COLLECT
+	/* Data collection: HID mode uses SYS_INIT, CDC mode needs manual init */
+#if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
 	data_collect_init();
 #endif
 

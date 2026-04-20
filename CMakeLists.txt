@@ -75,9 +75,18 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(NONE)
 
 FILE(GLOB_RECURSE app_sources src/*.c)
-# Conditionally exclude data_collect.c when DATA_COLLECT is not enabled
-if(NOT CONFIG_DATA_COLLECT)
-  list(FILTER app_sources EXCLUDE REGEX ".*data_collect\\.c$")
+# Data collection: choose HID or CDC implementation, or exclude both
+if(CONFIG_DATA_COLLECT)
+  if(CONFIG_DATA_COLLECT_HID)
+    # HID mode: exclude CDC implementation
+    list(FILTER app_sources EXCLUDE REGEX ".*data_collect\\.c$")
+  else()
+    # CDC mode: exclude HID implementation
+    list(FILTER app_sources EXCLUDE REGEX ".*data_collect_hid\\.c$")
+  endif()
+else()
+  # No data collection: exclude both
+  list(FILTER app_sources EXCLUDE REGEX ".*data_collect.*\\.c$")
 endif()
 # NORDIC SDK APP START
 target_sources(app PRIVATE ${app_sources})

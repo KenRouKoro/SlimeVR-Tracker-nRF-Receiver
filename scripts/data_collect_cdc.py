@@ -199,7 +199,14 @@ def collect(port, output_path, duration=None):
     frame_count = 0
     sample_count = 0
     last_status = start_time
+    last_status_samples = 0
     last_rssi = 0
+    # Sequence tracking for loss rate
+    last_seq = None
+    total_expected = 0
+    total_lost = 0
+    period_expected = 0
+    period_lost = 0
 
     base = Path(output_path)
     meta_path = base.with_suffix(".meta.txt")
@@ -235,6 +242,19 @@ def collect(port, output_path, duration=None):
             elif pkt_type == 0x10:  # Raw IMU
                 s = parse_raw_imu(esb_payload, meta)
                 if s:
+                    # Track sequence gaps for loss rate
+                    seq = s["seq"]
+                    if last_seq is not None:
+                        gap = (seq - last_seq) & 0xFFFF  # uint16 wrap
+                        if 0 < gap <= 1000:  # sane range
+                            total_expected += gap
+                            period_expected += gap
+                            lost = gap - 1
+                            if lost > 0:
+                                total_lost += lost
+                                period_lost += lost
+                    last_seq = seq
+
                     mag = s.get("mag") or (0.0, 0.0, 0.0)
                     temp = s.get('temp_c') or 0.0
                     csv_file.write(
@@ -251,15 +271,22 @@ def collect(port, output_path, duration=None):
             if now - last_status >= 2.0:
                 csv_file.flush()
                 elapsed = now - start_time
-                rate = sample_count / elapsed if elapsed > 0 else 0
+                period = now - last_status
+                period_samples = sample_count - last_status_samples
+                rate = period_samples / period if period > 0 else 0
+                loss_pct = (period_lost / period_expected * 100) if period_expected > 0 else 0
+                total_loss_pct = (total_lost / total_expected * 100) if total_expected > 0 else 0
                 print(
-                    f"\r[{elapsed:.1f}s] Frames: {frame_count}, "
-                    f"Samples: {sample_count} ({rate:.0f}/s), "
-                    f"RSSI: {last_rssi}",
+                    f"\r[{elapsed:.1f}s] Samples: {sample_count} ({rate:.0f}/s), "
+                    f"Loss: {loss_pct:.1f}% (total {total_loss_pct:.1f}%), "
+                    f"RSSI: {last_rssi}   ",
                     end="",
                     flush=True,
                 )
                 last_status = now
+                last_status_samples = sample_count
+                period_expected = 0
+                period_lost = 0
 
             if duration and (now - start_time >= duration):
                 break
@@ -270,9 +297,11 @@ def collect(port, output_path, duration=None):
         csv_file.close()
 
     elapsed = time.time() - start_time
+    total_loss_pct = (total_lost / total_expected * 100) if total_expected > 0 else 0
     print(f"\n\nCollection complete:")
     print(f"  Duration: {elapsed:.1f}s")
     print(f"  Samples: {sample_count} -> {csv_path}")
+    print(f"  Packet loss: {total_loss_pct:.2f}% ({total_lost}/{total_expected})")
     if meta.received:
         # Append duration and actual ODR to metadata
         with open(meta_path, "a") as f:

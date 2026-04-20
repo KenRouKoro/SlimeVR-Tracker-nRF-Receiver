@@ -2069,6 +2069,12 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 		case ESB_PONG_FLAG_TEST_MODE_OFF:
 			cmd_name = "TEST_MODE_OFF";
 			break;
+		case ESB_PONG_FLAG_DATA_COLLECT_ON:
+			cmd_name = "DATA_COLLECT_ON";
+			break;
+		case ESB_PONG_FLAG_DATA_COLLECT_OFF:
+			cmd_name = "DATA_COLLECT_OFF";
+			break;
 		}
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", cmd_name, command_flag, tracker_id);
 	} else {

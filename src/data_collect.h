@@ -29,26 +29,27 @@
 #ifdef CONFIG_DATA_COLLECT
 
 /*
- * Binary framing protocol for CDC output:
+ * Data collection via dedicated HID endpoint (HID_1).
  *
- *   [0xAA][0x55][length][payload...][CRC-8]
+ * Each raw ESB packet is forwarded as a single 64-byte HID input report:
+ *   [0..N-1]    ESB payload (up to 48 bytes, same format as over-the-air)
+ *   [N]         RSSI
+ *   [N+1..N+4]  rx_ticks (BE32, Zephyr uptime ticks)
+ *   [N+5..63]   zero padding
  *
- * length: payload byte count (1-252)
- * CRC-8: CCITT over length + payload bytes
+ * No framing protocol needed — HID guarantees packet boundaries.
+ * The PC reads from the second HID interface (vendor usage page 0xFF00).
  *
- * Payload is the raw ESB packet data as received from the tracker:
+ * Payload types (byte 0):
  *   - Type 0x10 (RAW_IMU):  48 bytes
  *   - Type 0x11 (RAW_MAG):  up to 17 bytes
  *   - Type 0x12 (RAW_META): 48 bytes
- *
- * An additional 5-byte footer is appended to each frame:
- *   [rssi(1)][rx_ticks(4)]   (receiver timestamp + RSSI)
  */
 
-/* Initialize data collection CDC output (called from console thread) */
+/* Initialize data collection HID endpoint */
 int data_collect_init(void);
 
-/* Write a raw data packet to CDC output with binary framing.
+/* Write a raw data packet as a HID report.
  * Called from ESB event handler when a raw packet (0x10-0x12) arrives.
  * data: raw ESB payload, len: payload length, rssi: received signal strength */
 void data_collect_write(const uint8_t *data, uint8_t len, uint8_t rssi);
