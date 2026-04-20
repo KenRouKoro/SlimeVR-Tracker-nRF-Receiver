@@ -68,12 +68,6 @@ static inline uint32_t tdma_pack_config(uint8_t slot, uint8_t total, uint8_t slo
 static void tdma_recalculate(void);
 
 static struct esb_payload rx_payload;
-// static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
-//														  0, 0, 0, 0, 0, 0, 0, 0);
-// static struct esb_payload tx_payload_timer = ESB_CREATE_PAYLOAD(0,
-//														  0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-// 0, 0, 0, 0, 0, 0, 0);
-static struct esb_payload tx_payload_sync = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0);
 
 struct pairing_event {
 	uint8_t packet[8];
