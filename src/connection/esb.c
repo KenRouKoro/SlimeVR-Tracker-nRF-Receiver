@@ -688,6 +688,107 @@ static void esb_stats_thread(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Raw data ARQ — sequence tracking and retransmit requests via ACK payload.
+ *
+ * All state is volatile for ISR access.  Only the target tracker is tracked.
+ * Gap queue holds up to RAW_ARQ_MAX_GAPS missing sequence numbers.
+ * Each ACK payload carries up to RAW_ARQ_MAX_GAPS retransmit requests.
+ *
+ * ACK payload format for raw data (type 0x10):
+ *   [0]    = 0xAA  (marker byte)
+ *   [1]    = count  (0 = all OK, 1..4 = number of seqs to retransmit)
+ *   [2..3] = missing_seq_0 (BE16)
+ *   [4..5] = missing_seq_1 (BE16)  (if count >= 2)
+ *   ...
+ * -------------------------------------------------------------------------*/
+#define RAW_ARQ_MAX_GAPS 4
+#define RAW_ARQ_MARKER   0xAA
+
+static volatile uint16_t raw_arq_expected_seq;
+static volatile bool     raw_arq_seq_initialized;
+static volatile uint16_t raw_arq_gap_queue[RAW_ARQ_MAX_GAPS];
+static volatile uint8_t  raw_arq_gap_count;
+/* Counters for diagnostics (read by event_handler, not ISR-critical) */
+static volatile uint32_t raw_arq_gaps_detected;
+static volatile uint32_t raw_arq_retransmits_received;
+
+/* Called from esb_ack_handler_cb (ISR context) when raw data packet arrives.
+ * Updates gap queue and builds ACK payload with retransmit requests. */
+static void raw_arq_process_isr(uint16_t received_seq,
+				struct esb_payload *ack_payload,
+				bool *has_ack_payload)
+{
+	if (!raw_arq_seq_initialized) {
+		raw_arq_expected_seq = received_seq + 1;
+		raw_arq_seq_initialized = true;
+		*has_ack_payload = false;
+		return;
+	}
+
+	uint16_t expected = raw_arq_expected_seq;
+	int16_t diff = (int16_t)(received_seq - expected);
+
+	if (diff == 0) {
+		/* In order — advance expected */
+		raw_arq_expected_seq = received_seq + 1;
+	} else if (diff > 0 && diff <= 100) {
+		/* Forward gap: diff packets missing */
+		uint8_t remaining = RAW_ARQ_MAX_GAPS - raw_arq_gap_count;
+		uint16_t to_add = (uint16_t)diff;
+		if (to_add > remaining) to_add = remaining;
+		for (uint16_t i = 0; i < to_add; i++) {
+			raw_arq_gap_queue[raw_arq_gap_count++] =
+				(uint16_t)(expected + i);
+		}
+		raw_arq_gaps_detected += (uint32_t)diff;
+		raw_arq_expected_seq = received_seq + 1;
+	} else if (diff < 0 && diff > -100) {
+		/* Retransmitted (out-of-order) packet: remove from gap queue */
+		for (uint8_t i = 0; i < raw_arq_gap_count; i++) {
+			if (raw_arq_gap_queue[i] == received_seq) {
+				/* Shift remaining entries */
+				for (uint8_t j = i; j + 1 < raw_arq_gap_count; j++) {
+					raw_arq_gap_queue[j] = raw_arq_gap_queue[j + 1];
+				}
+				raw_arq_gap_count--;
+				raw_arq_retransmits_received++;
+				break;
+			}
+		}
+		/* Don't advance expected_seq for retransmits */
+	} else {
+		/* Large jump — treat as reset/restart */
+		raw_arq_expected_seq = received_seq + 1;
+		raw_arq_gap_count = 0;
+	}
+
+	/* Build ACK payload with pending retransmit requests */
+	if (raw_arq_gap_count > 0) {
+		uint8_t n = raw_arq_gap_count;
+		ack_payload->pipe = 0; /* will be overridden by caller */
+		ack_payload->length = 2 + n * 2;
+		ack_payload->noack = false;
+		ack_payload->data[0] = RAW_ARQ_MARKER;
+		ack_payload->data[1] = n;
+		for (uint8_t i = 0; i < n; i++) {
+			sys_put_be16(raw_arq_gap_queue[i],
+				     &ack_payload->data[2 + i * 2]);
+		}
+		*has_ack_payload = true;
+	} else {
+		*has_ack_payload = false;
+	}
+}
+
+static void raw_arq_reset(void)
+{
+	raw_arq_seq_initialized = false;
+	raw_arq_gap_count = 0;
+	raw_arq_gaps_detected = 0;
+	raw_arq_retransmits_received = 0;
+}
+
+/* ---------------------------------------------------------------------------
  * ACK handler — runs in radio ISR context (~130 µs budget).
  * Builds the ACK payload for the *current* packet so the response is
  * returned in the same transaction rather than the next one.
@@ -846,6 +947,19 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 	}
 
 	/* Other packet types: no ACK payload, handled by event_handler */
+
+	/* ---- Raw data ARQ (type 0x10, data collection active) ---- */
+	if (data_length >= 4 && pdu_data[0] == ESB_RAW_IMU_TYPE) {
+		uint8_t tracker_id = pdu_data[1];
+		if (data_collect_is_active() &&
+		    data_collect_is_target(tracker_id)) {
+			uint16_t seq = sys_get_be16(&pdu_data[2]);
+			raw_arq_process_isr(seq, ack_payload, has_ack_payload);
+			if (*has_ack_payload) {
+				ack_payload->pipe = pipe_id;
+			}
+		}
+	}
 }
 
 void event_handler(struct esb_evt const *event)
@@ -1968,6 +2082,12 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 {
 	if (tracker_id < MAX_TRACKERS) {
 		tracker_remote_command[tracker_id] = command_flag;
+
+		/* Reset ARQ state when data collection starts */
+		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON) {
+			raw_arq_reset();
+		}
+
 		const char *cmd_name = "UNKNOWN";
 		switch (command_flag) {
 		case ESB_PONG_FLAG_NORMAL:

@@ -155,7 +155,7 @@ def find_data_hid(device_index=None):
 
 
 def collect_hid(output_path, duration=None, device_index=None):
-    """Main HID-based data collection loop."""
+    """Main HID-based data collection loop with reorder buffer for ARQ retransmits."""
     import hid
 
     dev_path, dev_info = find_data_hid(device_index)
@@ -178,12 +178,13 @@ def collect_hid(output_path, duration=None, device_index=None):
     last_status = start_time
     last_status_samples = 0
     last_rssi = 0
-    # Sequence tracking for loss rate
-    last_seq = None
-    total_expected = 0
-    total_lost = 0
-    period_expected = 0
-    period_lost = 0
+    retransmit_count = 0
+
+    # Reorder buffer: holds samples until we can write them in order.
+    # Keyed by sequence number; flushed when contiguous run available.
+    REORDER_BUF_MAX = 64  # max buffered samples before force-flush
+    reorder_buf = {}  # seq -> csv_line
+    write_cursor = None  # next seq expected to be written
 
     base = Path(output_path)
     meta_path = base.with_suffix(".meta.txt")
@@ -198,10 +199,32 @@ def collect_hid(output_path, duration=None, device_index=None):
     csv_file = open(csv_path, "w", encoding="utf-8")
     csv_file.write("seq,gx,gy,gz,ax,ay,az,mx,my,mz,temp\n")
 
+    def flush_reorder_buf():
+        """Write contiguous samples from write_cursor onwards."""
+        nonlocal write_cursor, sample_count
+        if write_cursor is None:
+            return
+        while write_cursor in reorder_buf:
+            csv_file.write(reorder_buf.pop(write_cursor))
+            sample_count += 1
+            write_cursor = (write_cursor + 1) & 0xFFFF
+
+    def force_flush_reorder_buf():
+        """Force-flush oldest samples when buffer is too large."""
+        nonlocal write_cursor, sample_count
+        if not reorder_buf:
+            return
+        # Sort remaining keys and write them all
+        for seq in sorted(reorder_buf.keys(),
+                          key=lambda s: (s - write_cursor) & 0xFFFF):
+            csv_file.write(reorder_buf[seq])
+            sample_count += 1
+        write_cursor = (max(reorder_buf.keys(),
+                            key=lambda s: (s - write_cursor) & 0xFFFF) + 1) & 0xFFFF
+        reorder_buf.clear()
+
     try:
         while True:
-            # Non-blocking read with 500ms timeout so Ctrl+C works
-            # when data collection is stopped on the receiver
             report = h.read(64, timeout_ms=500)
             if not report:
                 continue
@@ -213,13 +236,11 @@ def collect_hid(output_path, duration=None, device_index=None):
             pkt_type = report[0]
             frame_count += 1
 
-            # Extract RSSI and rx_ticks from footer
-            # Footer position depends on payload type
-            if pkt_type == 0x10:  # Raw IMU: 48 bytes payload
+            if pkt_type == 0x10:
                 esb_len = 48
-            elif pkt_type == 0x11:  # Raw Mag: variable
+            elif pkt_type == 0x11:
                 esb_len = 16
-            elif pkt_type == 0x12:  # Metadata: 48 bytes
+            elif pkt_type == 0x12:
                 esb_len = 48
             else:
                 continue
@@ -243,29 +264,46 @@ def collect_hid(output_path, duration=None, device_index=None):
             elif pkt_type == 0x10:  # Raw IMU
                 s = parse_raw_imu(esb_payload)
                 if s:
-                    # Track sequence gaps for loss rate
                     seq = s["seq"]
-                    if last_seq is not None:
-                        gap = (seq - last_seq) & 0xFFFF  # uint16 wrap
-                        if 0 < gap <= 1000:  # sane range
-                            total_expected += gap
-                            period_expected += gap
-                            lost = gap - 1
-                            if lost > 0:
-                                total_lost += lost
-                                period_lost += lost
-                    last_seq = seq
+
+                    # Detect retransmit (seq < write_cursor or already in buffer)
+                    if write_cursor is not None:
+                        diff = (seq - write_cursor) & 0xFFFF
+                        if diff > 0x8000:
+                            # seq is behind write_cursor — late retransmit, already written
+                            retransmit_count += 1
+                            continue
+                    if seq in reorder_buf:
+                        # Duplicate
+                        continue
+
+                    # Initialize write cursor on first sample
+                    if write_cursor is None:
+                        write_cursor = seq
 
                     mag = s.get("mag") or (0.0, 0.0, 0.0)
                     temp = s.get("temp_c") or 0.0
-                    csv_file.write(
-                        f"{s['seq']},"
+                    csv_line = (
+                        f"{seq},"
                         f"{s['gyro'][0]:.6f},{s['gyro'][1]:.6f},{s['gyro'][2]:.6f},"
                         f"{s['accel'][0]:.6f},{s['accel'][1]:.6f},{s['accel'][2]:.6f},"
                         f"{mag[0]:.6f},{mag[1]:.6f},{mag[2]:.6f},"
                         f"{temp:.2f}\n"
                     )
-                    sample_count += 1
+
+                    reorder_buf[seq] = csv_line
+
+                    # Check if this was a retransmit filling a gap
+                    diff = (seq - write_cursor) & 0xFFFF
+                    if diff > 0 and diff < REORDER_BUF_MAX:
+                        retransmit_count += 1
+
+                    # Flush contiguous samples from write cursor
+                    flush_reorder_buf()
+
+                    # Force flush if buffer is too large (gap not filled in time)
+                    if len(reorder_buf) >= REORDER_BUF_MAX:
+                        force_flush_reorder_buf()
 
             now = time.time()
             if now - last_status >= 2.0:
@@ -274,19 +312,17 @@ def collect_hid(output_path, duration=None, device_index=None):
                 period = now - last_status
                 period_samples = sample_count - last_status_samples
                 rate = period_samples / period if period > 0 else 0
-                loss_pct = (period_lost / period_expected * 100) if period_expected > 0 else 0
-                total_loss_pct = (total_lost / total_expected * 100) if total_expected > 0 else 0
+                buffered = len(reorder_buf)
+                retx_info = f", Retx: {retransmit_count}" if retransmit_count > 0 else ""
+                buf_info = f", Buf: {buffered}" if buffered > 0 else ""
                 print(
-                    f"\r[{elapsed:.1f}s] Samples: {sample_count} ({rate:.0f}/s), "
-                    f"Loss: {loss_pct:.1f}% (total {total_loss_pct:.1f}%), "
-                    f"RSSI: {last_rssi}   ",
+                    f"\r[{elapsed:.1f}s] Samples: {sample_count} ({rate:.0f}/s)"
+                    f"{retx_info}{buf_info}, RSSI: {last_rssi}   ",
                     end="",
                     flush=True,
                 )
                 last_status = now
                 last_status_samples = sample_count
-                period_expected = 0
-                period_lost = 0
 
             if duration and (now - start_time >= duration):
                 break
@@ -294,15 +330,17 @@ def collect_hid(output_path, duration=None, device_index=None):
     except KeyboardInterrupt:
         print("\n\nStopping collection...")
     finally:
+        # Flush remaining buffer
+        if reorder_buf:
+            force_flush_reorder_buf()
         csv_file.close()
         h.close()
 
     elapsed = time.time() - start_time
-    total_loss_pct = (total_lost / total_expected * 100) if total_expected > 0 else 0
     print(f"\n\nCollection complete:")
     print(f"  Duration: {elapsed:.1f}s")
     print(f"  Samples: {sample_count} -> {csv_path}")
-    print(f"  Packet loss: {total_loss_pct:.2f}% ({total_lost}/{total_expected})")
+    print(f"  Retransmits received: {retransmit_count}")
     if meta.received:
         with open(meta_path, "a", encoding="utf-8") as f:
             f.write(f"duration_s={elapsed:.3f}\n")
