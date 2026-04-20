@@ -243,10 +243,18 @@ static void send_report(struct k_work *work)
 
 		if (ret != 0) {
 			/*
-			 * Do nothing and wait until host has reset the device
-			 * and hid_ep_in_busy is cleared.
+			 * Write failed — clear the busy flag immediately so the
+			 * next timer cycle can attempt to send again.  Without
+			 * this, the flag stays set until the 100 ms stuck timeout
+			 * because the completion callback never fires on error.
 			 */
-			LOG_ERR("Failed to submit report");
+			atomic_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
+			static int64_t last_err_log;
+			int64_t now = k_uptime_get();
+			if (now - last_err_log > 5000) {
+				LOG_ERR("Failed to submit report");
+				last_err_log = now;
+			}
 		} else {
 			//LOG_DBG("Report submitted");
 		}
