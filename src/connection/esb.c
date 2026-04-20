@@ -25,6 +25,7 @@
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/crc.h>
 
 #include "globals.h"
@@ -1374,7 +1375,10 @@ void event_handler(struct esb_evt const *event)
 			default:
 			{
 				/* Raw data collection packets (types 0x10-0x12): variable length.
-				 * Forward raw payload to CDC for PC-side data collection. */
+				 * Forward raw payload to CDC for PC-side data collection.
+				 * Duplicate raw IMU packets (same tracker+sequence) are
+				 * dropped since trackers send each sample twice for
+				 * redundancy in noack mode. */
 				uint8_t pkt_type = rx_payload.data[0];
 				if (pkt_type == ESB_RAW_IMU_TYPE ||
 				    pkt_type == ESB_RAW_MAG_TYPE ||
@@ -1382,6 +1386,17 @@ void event_handler(struct esb_evt const *event)
 					uint8_t tracker_id = rx_payload.data[1];
 					if (tracker_id < stored_trackers &&
 					    data_collect_is_target(tracker_id)) {
+						/* Dedup raw IMU by tracker_id + sequence */
+						if (pkt_type == ESB_RAW_IMU_TYPE) {
+							static uint8_t last_raw_tracker = 0xFF;
+							static uint16_t last_raw_seq = 0xFFFF;
+							uint16_t seq = sys_get_be16(&rx_payload.data[2]);
+							if (tracker_id == last_raw_tracker && seq == last_raw_seq) {
+								break; /* duplicate */
+							}
+							last_raw_tracker = tracker_id;
+							last_raw_seq = seq;
+						}
 						data_collect_write(rx_payload.data,
 								   rx_payload.length,
 								   rx_payload.rssi);
