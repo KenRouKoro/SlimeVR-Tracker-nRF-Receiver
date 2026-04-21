@@ -196,6 +196,7 @@ def collect(port, output_path, duration=None):
     """Main data collection loop with incremental file writing."""
     meta = SensorMetadata()
     start_time = time.time()
+    first_sample_time = None
     frame_count = 0
     sample_count = 0
     last_status = start_time
@@ -256,6 +257,7 @@ def collect(port, output_path, duration=None):
 
                     if write_cursor is None:
                         write_cursor = seq
+                        first_sample_time = time.time()
 
                     mag = s.get("mag") or (0.0, 0.0, 0.0)
                     temp = s.get('temp_c') or 0.0
@@ -344,8 +346,9 @@ def collect(port, output_path, duration=None):
         csv_file.close()
 
     elapsed = time.time() - start_time
+    data_duration = (time.time() - first_sample_time) if first_sample_time else elapsed
     print(f"\n\nCollection complete:")
-    print(f"  Duration: {elapsed:.1f}s")
+    print(f"  Duration: {elapsed:.1f}s (data: {data_duration:.1f}s)")
     print(f"  Samples: {sample_count} -> {csv_path}")
     print(f"  Retransmits received: {retransmit_count}")
     total = sample_count + gap_count
@@ -354,10 +357,8 @@ def collect(port, output_path, duration=None):
     if meta.received:
         # Append duration and actual ODR to metadata
         with open(meta_path, "a") as f:
-            f.write(f"duration_s={elapsed:.3f}\n")
+            f.write(f"duration_s={data_duration:.3f}\n")
             f.write(f"sample_count={sample_count}\n")
-            if elapsed > 0:
-                f.write(f"actual_odr_hz={sample_count / elapsed:.6f}\n")
         print(f"  Metadata: {meta_path}")
 
 

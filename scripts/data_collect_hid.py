@@ -173,6 +173,7 @@ def collect_hid(output_path, duration=None, device_index=None):
 
     meta = SensorMetadata()
     start_time = time.time()
+    first_sample_time = None  # set when first data sample arrives
     frame_count = 0
     sample_count = 0
     last_status = start_time
@@ -286,6 +287,7 @@ def collect_hid(output_path, duration=None, device_index=None):
                     # Initialize write cursor on first sample
                     if write_cursor is None:
                         write_cursor = seq
+                        first_sample_time = time.time()
 
                     mag = s.get("mag") or (0.0, 0.0, 0.0)
                     temp = s.get("temp_c") or 0.0
@@ -355,8 +357,9 @@ def collect_hid(output_path, duration=None, device_index=None):
         h.close()
 
     elapsed = time.time() - start_time
+    data_duration = (time.time() - first_sample_time) if first_sample_time else elapsed
     print(f"\n\nCollection complete:")
-    print(f"  Duration: {elapsed:.1f}s")
+    print(f"  Duration: {elapsed:.1f}s (data: {data_duration:.1f}s)")
     print(f"  Samples: {sample_count} -> {csv_path}")
     print(f"  Retransmits received: {retransmit_count}")
     total = sample_count + gap_count
@@ -364,10 +367,8 @@ def collect_hid(output_path, duration=None, device_index=None):
     print(f"  Gaps (lost): {gap_count} ({loss_pct:.2f}%)")
     if meta.received:
         with open(meta_path, "a", encoding="utf-8") as f:
-            f.write(f"duration_s={elapsed:.3f}\n")
+            f.write(f"duration_s={data_duration:.3f}\n")
             f.write(f"sample_count={sample_count}\n")
-            if elapsed > 0:
-                f.write(f"actual_odr_hz={sample_count / elapsed:.6f}\n")
         print(f"  Metadata: {meta_path}")
 
 
