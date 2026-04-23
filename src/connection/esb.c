@@ -1473,6 +1473,10 @@ void event_handler(struct esb_evt const *event)
 			} break;
 			case 17: // 16 bytes data + 1 byte sequence number
 			{
+				if (rx_payload.data[0] == ESB_COMPOSITE_TYPE) {
+					goto handle_composite_packet;
+				}
+
 				uint8_t tracker_id = rx_payload.data[1];
 
 				// TDMA Slot Check for Data (Type 17)
@@ -1546,6 +1550,7 @@ void event_handler(struct esb_evt const *event)
 					}
 					break;
 				}
+handle_composite_packet:
 				/* Composite packet (type ESB_COMPOSITE_TYPE): variable length.
 				 * Format: [ESB_COMPOSITE_TYPE][tracker_id][sub_count][sub_type0][sub_data0...]...[sequence]
 				 * Each sub-packet: 1 byte type + variable data.
