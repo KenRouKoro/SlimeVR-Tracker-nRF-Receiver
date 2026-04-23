@@ -1515,20 +1515,6 @@ void event_handler(struct esb_evt const *event)
 				hid_write_packet_n(rx_payload.data,
 								   rx_payload.rssi); // write to hid endpoint
 			} break;
-			case 16: // legacy format without sequence number, no TDMA check, just for backward compatibility
-			{
-				uint8_t imu_id = rx_payload.data[1];
-
-				if (imu_id >= stored_trackers) { // not a stored tracker
-					continue;
-				}
-
-				if (rx_payload.data[0] > 223) { // reserved for receiver only
-					break;
-				}
-				hid_write_packet_n(rx_payload.data,
-								   rx_payload.rssi); // write to hid endpoint
-			} break;
 			default:
 			{
 				/* Raw data collection packets (types 0x10-0x12): variable length.
@@ -1560,8 +1546,8 @@ void event_handler(struct esb_evt const *event)
 					}
 					break;
 				}
-				/* Composite packet (type 0x05): variable length.
-				 * Format: [0x05][tracker_id][sub_count][sub_type0][sub_data0...]...[sequence]
+				/* Composite packet (type ESB_COMPOSITE_TYPE): variable length.
+				 * Format: [ESB_COMPOSITE_TYPE][tracker_id][sub_count][sub_type0][sub_data0...]...[sequence]
 				 * Each sub-packet: 1 byte type + variable data.
 				 */
 				if (rx_payload.length < 5 || rx_payload.data[0] != ESB_COMPOSITE_TYPE) {
