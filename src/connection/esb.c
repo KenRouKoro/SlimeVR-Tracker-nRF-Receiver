@@ -1608,6 +1608,7 @@ void event_handler(struct esb_evt const *event)
 					case 2: sub_len = 13; break; /* compact quat */
 					case 3: sub_len = 2; break;  /* status */
 					case 4: sub_len = 14; break; /* quat+mag */
+					case 5: sub_len = 8; break;  /* runtime */
 					default:
 						LOG_ERR("Unknown composite sub-type: %d", sub_type);
 						sub_len = -1;
