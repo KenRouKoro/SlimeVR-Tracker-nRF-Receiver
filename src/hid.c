@@ -554,6 +554,8 @@ K_THREAD_DEFINE(usb_init_thread_id, 256, usb_init_thread, NULL, NULL, NULL, 6, 0
 //|RX     6|id      |button  |sleeptime        |resv-------------------------------------------------------------------------------------|rssi    |
 //|RX     7|id      |button  |sleeptime        |q_buf                              |a0               |a1               |a2               |rssi    |
 
+// runtime is in microseconds (overkill), sleeptime is in milliseconds (overkill but less)
+
 // Per-tracker FIFO drop tracking for detailed diagnostics
 static uint32_t tracker_drops[MAX_TRACKERS] = {0};
 static int64_t last_drop_log_time[MAX_TRACKERS] = {0};

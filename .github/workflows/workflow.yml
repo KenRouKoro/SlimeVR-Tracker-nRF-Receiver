@@ -37,6 +37,11 @@ jobs:
           submodules: recursive
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: 📟 Install yq
+        run: |
+          sudo wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+          sudo chmod +x /usr/bin/yq
+
       - name: 📟 Generate CI Variables
         id: generate-vars
         run: |
