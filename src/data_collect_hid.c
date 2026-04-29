@@ -36,6 +36,7 @@
 
 #include "globals.h"
 #include "data_collect.h"
+#include "connection/esb.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -81,6 +82,10 @@ static uint8_t dc_target_tracker_id;
 static uint32_t dc_frames_sent;
 static uint32_t dc_frames_dropped;
 static uint32_t dc_frames_received; /* Total raw packets from ESB (before dedup) */
+
+/* Timeout: auto-stop if no raw data received for this long */
+#define DC_TIMEOUT_MS 60000
+static int64_t dc_last_rx_time;
 
 /* Periodic stats */
 static int64_t dc_last_stats_time;
@@ -133,9 +138,36 @@ static const struct hid_ops dc_hid_ops = {
 	.int_in_ready = dc_int_in_ready_cb,
 };
 
+/* Timeout work: stop collection and notify tracker (runs in workqueue context) */
+static void dc_timeout_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	if (!dc_active) return;
+	uint8_t tid = dc_target_tracker_id;
+	data_collect_stop();
+	esb_send_remote_command(tid, ESB_PONG_FLAG_DATA_COLLECT_OFF);
+	LOG_WRN("Data collection timed out (no data for %d s), sent OFF to tracker %u",
+		DC_TIMEOUT_MS / 1000, tid);
+}
+static K_WORK_DEFINE(dc_timeout_work, dc_timeout_work_handler);
+
+/* Periodic timer for timeout checking (HID version has no flush timer) */
+static void dc_timeout_timer_handler(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	if (dc_active && dc_last_rx_time > 0 &&
+	    (k_uptime_get() - dc_last_rx_time) > DC_TIMEOUT_MS) {
+		k_work_submit(&dc_timeout_work);
+	}
+}
+static K_TIMER_DEFINE(dc_timeout_timer, dc_timeout_timer_handler, NULL);
+
 int data_collect_init(void)
 {
 	k_work_init(&dc_send_work, dc_send_work_handler);
+
+	/* Start periodic timeout check (1 second interval) */
+	k_timer_start(&dc_timeout_timer, K_SECONDS(1), K_SECONDS(1));
 
 	dc_hdev = device_get_binding("HID_1");
 	if (dc_hdev == NULL) {
@@ -170,6 +202,7 @@ void data_collect_write(const uint8_t *data, uint8_t len, uint8_t rssi)
 {
 	if (!dc_hdev || !dc_active) return;
 
+	dc_last_rx_time = k_uptime_get();
 	dc_frames_received++;
 
 	/* Periodic stats (every 3 seconds) */
@@ -226,6 +259,7 @@ void data_collect_start(uint8_t tracker_id)
 	dc_last_stats_sent = 0;
 	dc_last_stats_dropped = 0;
 	dc_last_stats_received = 0;
+	dc_last_rx_time = k_uptime_get();
 	/* Reset FIFO */
 	atomic_set(&dc_fifo_write, 0);
 	atomic_set(&dc_fifo_read, 0);
