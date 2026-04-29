@@ -36,8 +36,9 @@ LOG_MODULE_REGISTER(data_collect, LOG_LEVEL_INF);
 static const struct device *cdc_dev;
 static bool cdc_ready;
 
-/* Ring buffer for CDC output to decouple ISR-context writes from USB */
-#define DATA_COLLECT_BUF_SIZE 4096
+/* Ring buffer for CDC output to decouple ISR-context writes from USB.
+ * 16 KB holds ~287 frames (57 bytes each) ≈ 717 ms at 400 Hz. */
+#define DATA_COLLECT_BUF_SIZE 16384
 static uint8_t dc_buf[DATA_COLLECT_BUF_SIZE];
 static volatile uint32_t dc_buf_head;
 static volatile uint32_t dc_buf_tail;

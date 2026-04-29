@@ -66,8 +66,10 @@ static ATOMIC_DEFINE(dc_ep_busy, 1);
 
 /* Report FIFO: ISR writes here, work handler reads.
  * hid_int_ep_write() is NOT safe from ISR context (event_handler),
- * so we buffer reports and process them in the system work queue. */
-#define DC_FIFO_SIZE 16
+ * so we buffer reports and process them in the system work queue.
+ * 64 slots × 64 bytes = 4 KB; at 400 Hz input rate this provides
+ * ~160 ms of buffering against transient USB stalls. */
+#define DC_FIFO_SIZE 64
 static uint8_t dc_fifo[DC_FIFO_SIZE][64];
 static atomic_t dc_fifo_write;
 static atomic_t dc_fifo_read;
