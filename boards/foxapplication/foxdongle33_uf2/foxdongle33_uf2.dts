@@ -144,6 +144,7 @@ zephyr_udc0: &usbd {
 		compatible = "zephyr,cdc-acm-uart";
 	};
 };
+
 &nfct {
 	status = "disabled";
 };

@@ -30,6 +30,7 @@
 #include <zephyr/console/console.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/logging/log_ctrl.h>
+#include "data_collect.h"
 
 #define DFU_EXISTS CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
 #define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
@@ -57,6 +58,11 @@ static void console_thread(void)
 		sys_reboot(SYS_REBOOT_COLD);
 #endif
 	}
+#endif
+
+	/* Data collection: HID mode uses SYS_INIT, CDC mode needs manual init */
+#if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
+	data_collect_init();
 #endif
 
 	console_getline_init();
