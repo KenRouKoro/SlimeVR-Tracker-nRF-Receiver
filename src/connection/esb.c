@@ -290,8 +290,10 @@ struct tdma_stats {
 	int32_t min_offset;      // Minimum offset seen
 	int32_t max_offset;      // Maximum offset seen
 	uint32_t count;          // Packet count
-	uint32_t violations;     // Slot violation count
+	uint32_t violations;     // Slot violation count (deviation from running mean)
 	int64_t last_log_time;   // Last log output time
+	int32_t phase_ema_q8;    // EMA of ref_offset in Q8 fixed-point (×256)
+	bool phase_initialized;  // Whether EMA has been seeded
 };
 
 static struct tdma_stats g_tdma_stats[MAX_TRACKERS] = {0};
@@ -314,18 +316,33 @@ static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS] = {0};
 static volatile uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS] = {0};
 static volatile bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS] = {false};
 
+/* Per-tracker RADIO ISR timestamp for ALL packets (PING + data).
+ * Now works for NoACK data packets too, since the ESB library was patched
+ * to always call ack_handler regardless of the no_ack flag.
+ * Used by tdma_check_slot() for accurate phase measurement. */
+static volatile uint32_t g_last_isr_rx_ticks[MAX_TRACKERS] = {0};
+static volatile bool g_last_isr_rx_valid[MAX_TRACKERS] = {false};
+
 #if TDMA_ENABLED
 /**
  * Check if a packet from a tracker arrived in its assigned TDMA slot.
  * Uses dynamic parameters from tdma_config_packed[].
  *
  * @param tracker_id   The tracker's ID (0-15)
- * @param rx_ticks     Receiver time in ticks when packet arrived
+ * @param rx_ticks     Receiver time in ticks when packet arrived (EVENT_IRQ fallback)
  */
 static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
 {
 	if (tracker_id >= MAX_TRACKERS) {
 		return;
+	}
+
+	/* Prefer RADIO ISR timestamp (accurate) over EVENT_IRQ timestamp
+	 * (delayed 10-25+ ticks by kernel scheduling).  The ISR timestamp is
+	 * now available for ALL packets including NoACK data, thanks to the
+	 * ESB library patch that always calls on_radio_disabled_rx_dpl(). */
+	if (g_last_isr_rx_valid[tracker_id]) {
+		rx_ticks = g_last_isr_rx_ticks[tracker_id];
 	}
 
 	/* Read dynamic TDMA config (atomic 32-bit load) */
@@ -383,18 +400,46 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
 		}
 	}
 
+	/*
+	 * Phase-consistency violation detection.
+	 *
+	 * The absolute ref_offset includes a per-tracker constant bias from:
+	 *   - D_est update after PONG (tracker updates offset, receiver's
+	 *     clock_bias is stale until next PING)
+	 *   - ISR-vs-EVENT timing differences
+	 *   - Air-time asymmetry in RTT model
+	 *
+	 * Instead of checking absolute offset against slot boundaries, track
+	 * a running mean (EMA) of each tracker's observed phase and flag
+	 * DEVIATIONS from that mean.  This automatically adapts to D_est
+	 * jumps and only fires for genuine TDMA failures (wrong slot, phase
+	 * drift, collisions).
+	 */
+	if (!stats->phase_initialized) {
+		stats->phase_ema_q8 = ref_offset << 8;
+		stats->phase_initialized = true;
+	} else {
+		/* EMA alpha=1/8: converges in ~8 packets (~50ms at 170 TPS) */
+		stats->phase_ema_q8 += (((ref_offset << 8) - stats->phase_ema_q8) + 4) >> 3;
+	}
+
+	int32_t phase_mean = stats->phase_ema_q8 >> 8;
+	int32_t deviation = ref_offset - phase_mean;
+	int32_t abs_dev = deviation < 0 ? -deviation : deviation;
+
+	/* Violation: packet deviates from its own running mean by more than
+	 * half a slot.  This catches actual TDMA failures while ignoring
+	 * the constant per-tracker phase bias. */
 	int32_t half_slot = (int32_t)(slot_ticks / 2);
-	int32_t abs_offset = ref_offset < 0 ? -ref_offset : ref_offset;
-	if (abs_offset > half_slot + TDMA_TOLERANCE_TICKS) {
+	if (abs_dev > half_slot) {
 		stats->violations++;
 
 		if ((stats->violations & 0x0F) == 1) {
 			LOG_DBG(
-				"TDMA viol trk=%u exp_slot=%u/%u phase=%u off=%d bias=%d",
+				"TDMA viol trk=%u dev=%d ema=%d off=%d bias=%d",
 				tracker_id,
-				expected_slot,
-				total_slots,
-				frame_phase,
+				deviation,
+				phase_mean,
 				ref_offset,
 				clock_bias
 			);
@@ -915,6 +960,15 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 		return;
 	}
 
+	/* ---- Capture ISR timestamp for any tracker packet (non-pairing) ---- */
+	if (data_length > 1 && pipe_id > 0) {
+		uint8_t tid = pdu_data[1];
+		if (tid < MAX_TRACKERS) {
+			g_last_isr_rx_ticks[tid] = k_uptime_ticks();
+			g_last_isr_rx_valid[tid] = true;
+		}
+	}
+
 	/* ---- PING → PONG (immediate response) ---- */
 	if (data_length == ESB_PING_LEN && pdu_data[0] == ESB_PING_TYPE) {
 		uint8_t tracker_id = pdu_data[1];
@@ -1197,13 +1251,14 @@ void event_handler(struct esb_evt const *event)
 #if TDMA_ENABLED
 						if (stats->violations > 12 && esb_get_stats_detailed_enabled()) {
 							LOG_WRN(
-								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld ticks StdDev=%u ticks Range=[%d, %d] "
-								"RxTimeDiff=%s%llu us",
+								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld StdDev=%u EMA=%d "
+								"Range=[%d,%d] RxDiff=%s%llu us",
 								tracker_id,
 								stats->count,
 								stats->violations,
 								mean,
 								std_dev,
+								stats->phase_initialized ? (stats->phase_ema_q8 >> 8) : 0,
 								stats->min_offset,
 								stats->max_offset,
 								rx_time_diff_ticks >= 0 ? "+" : "-",
@@ -1211,13 +1266,14 @@ void event_handler(struct esb_evt const *event)
 							);
 						} else {
 							LOG_DBG(
-								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld ticks StdDev=%u ticks Range=[%d, %d] "
-								"RxTimeDiff=%s%llu us",
+								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld StdDev=%u EMA=%d "
+								"Range=[%d,%d] RxDiff=%s%llu us",
 								tracker_id,
 								stats->count,
 								stats->violations,
 								mean,
 								std_dev,
+								stats->phase_initialized ? (stats->phase_ema_q8 >> 8) : 0,
 								stats->min_offset,
 								stats->max_offset,
 								rx_time_diff_ticks >= 0 ? "+" : "-",
@@ -1229,8 +1285,12 @@ void event_handler(struct esb_evt const *event)
 #endif
 					}
 
-					// Reset stats
+					// Reset stats (preserve phase EMA across windows)
+					int32_t saved_ema = stats->phase_ema_q8;
+					bool saved_init = stats->phase_initialized;
 					memset(stats, 0, sizeof(struct tdma_stats));
+					stats->phase_ema_q8 = saved_ema;
+					stats->phase_initialized = saved_init;
 					stats->last_log_time = now_ms;
 				}
 
