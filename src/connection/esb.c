@@ -75,7 +75,11 @@ LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 // uint32_t that the RADIO ISR reads atomically when constructing PONG packets.
 #define TDMA_ENABLED 1
 #define TDMA_MIN_SLOT_TICKS    14  /* minimum slot width (~427μs at 32768Hz) */
-#define TDMA_MAX_TPS_TARGET   200 /* max TPS per tracker */
+#define TDMA_TPS_TIER_HIGH   260  /* per-tracker TPS target for ≤3 trackers */
+#define TDMA_TPS_TIER_MID_H  220  /* per-tracker TPS target for 4-5 trackers */
+#define TDMA_TPS_TIER_MID    200  /* per-tracker TPS target for 6 trackers */
+#define TDMA_TPS_TIER_LOW    190  /* per-tracker TPS target for ≥7 trackers */
+#define TDMA_MIN_EFF_SLOT     18  /* effective slot floor → aggregate ≤ ~1820 TPS */
 #define TDMA_TOLERANCE_TICKS    3  /* slot violation tolerance band */
 #define TDMA_RECONFIG_MIN_MS 5000  /* minimum interval between TDMA reconfigurations */
 
@@ -150,6 +154,13 @@ static void tdma_recalculate(void)
 		return;
 	}
 
+	/* No active trackers — clear state and return */
+	if (active_count == 0) {
+		tdma_active_mask = 0;
+		tdma_dynamic_active_count = 0;
+		return;
+	}
+
 	/*
 	 * Rate-limit reconfiguration when trackers *disappear* to avoid
 	 * flapping from brief PING gaps.  New trackers should get slots
@@ -163,21 +174,16 @@ static void tdma_recalculate(void)
 
 	/* active_ids is already sorted (ascending) since we iterate 0..N */
 
-	uint8_t slot_ticks;
-	if (active_count <= 1) {
-		slot_ticks = TDMA_MIN_SLOT_TICKS;
-		if (active_count == 1) {
-			/* slot_ticks = 32768/200 = 163, but cap to keep frame short */
-			slot_ticks = 163;
-		}
-	} else {
-		/* slot_ticks = ceil(32768 / (200 * active_count)) */
-		uint32_t numerator = 32768;
-		uint32_t denominator = TDMA_MAX_TPS_TARGET * active_count;
-		slot_ticks = (uint8_t)((numerator + denominator - 1) / denominator);
-		if (slot_ticks < TDMA_MIN_SLOT_TICKS) {
-			slot_ticks = TDMA_MIN_SLOT_TICKS;
-		}
+	/* Tiered TPS: ≤3 → 260, 4-5 → 220, 6 → 200, ≥7 → 180, with aggregate cap */
+	uint16_t target_tps = (active_count <= 3) ? TDMA_TPS_TIER_HIGH
+	                    : (active_count <= 5) ? TDMA_TPS_TIER_MID_H
+	                    : (active_count <= 6) ? TDMA_TPS_TIER_MID
+	                    : TDMA_TPS_TIER_LOW;
+	uint32_t numerator = 32768;
+	uint32_t denominator = (uint32_t)target_tps * active_count;
+	uint8_t slot_ticks = (uint8_t)((numerator + denominator - 1) / denominator);
+	if (slot_ticks < TDMA_MIN_EFF_SLOT) {
+		slot_ticks = TDMA_MIN_EFF_SLOT;
 	}
 
 	tdma_config_epoch++;
@@ -1018,7 +1024,6 @@ void event_handler(struct esb_evt const *event)
 		break;
 	case ESB_EVENT_RX_RECEIVED: {
 		int err = 0;
-		uint32_t current_rx_ticks = k_uptime_ticks();
 		while (!err) {
 			err = esb_read_rx_payload(&rx_payload);
 			if (err == -ENODATA) {
@@ -1027,6 +1032,7 @@ void event_handler(struct esb_evt const *event)
 				LOG_ERR("Error while reading rx packet: %d", err);
 				break;
 			}
+			uint32_t current_rx_ticks = k_uptime_ticks();
 			switch (rx_payload.length) {
 			case 1: // ACK packet
 				LOG_DBG("RX ACK len=%u pipe=%u data=%02X", rx_payload.length, rx_payload.pipe, rx_payload.data[0]);
@@ -2601,13 +2607,13 @@ static void esb_thread(void)
 	 * recalculation detects them as active). */
 	if (tracker_count > 0) {
 		uint8_t init_slot;
-		if (tracker_count == 1) {
-			init_slot = 163;
-		} else {
-			uint32_t denom = TDMA_MAX_TPS_TARGET * tracker_count;
-			init_slot = (uint8_t)((32768 + denom - 1) / denom);
-			if (init_slot < TDMA_MIN_SLOT_TICKS) init_slot = TDMA_MIN_SLOT_TICKS;
-		}
+		uint16_t tps = (tracker_count <= 3) ? TDMA_TPS_TIER_HIGH
+		             : (tracker_count <= 5) ? TDMA_TPS_TIER_MID_H
+		             : (tracker_count <= 6) ? TDMA_TPS_TIER_MID
+		             : TDMA_TPS_TIER_LOW;
+		uint32_t denom = (uint32_t)tps * tracker_count;
+		init_slot = (uint8_t)((32768 + denom - 1) / denom);
+		if (init_slot < TDMA_MIN_EFF_SLOT) init_slot = TDMA_MIN_EFF_SLOT;
 		tdma_config_epoch++;
 		for (uint8_t i = 0; i < tracker_count && i < MAX_TRACKERS; i++) {
 			tdma_config_packed[i] = tdma_pack_config(
