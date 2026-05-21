@@ -18,6 +18,8 @@ permissions: write-all
 
 env:
   ZEPHYR_SDK_VERSION: "0.17.4"
+  # actions/cache v4 and other JS actions: opt into Node 24 before runner default (Jun 2026)
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   setup:
@@ -122,15 +124,7 @@ jobs:
             zephyr-workspace/tools
           key: west-workspace-${{ steps.generate-vars.outputs.sdk-hash }}
 
-      - name: 📦 Cache PIP Requirements
-        id: cache-pip
-        uses: actions/cache@v5
-        with:
-          path: ~/.venv
-          key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
-
-      - name: 📦 Restore Python venv
-        if: steps.cache-pip.outputs.cache-hit != 'true'
+      - name: 📦 Restore Python venv (base)
         id: restore-venv
         uses: actions/cache/restore@v5
         with:
@@ -139,14 +133,13 @@ jobs:
 
       - name: 🐍 Setup Python venv + West
         id: setup-venv
-        if: ${{ steps.cache-pip.outputs.cache-hit != 'true' && steps.restore-venv.outputs.cache-hit != 'true' }}
+        if: steps.restore-venv.outputs.cache-hit != 'true'
         run: |
           python3 -m venv ~/.venv
           ~/.venv/bin/pip install west ninja
 
-      - name: 📦 Cache Python venv
+      - name: 📦 Save Python venv (base)
         if: steps.restore-venv.outputs.cache-hit != 'true'
-        id: cache-venv
         uses: actions/cache/save@v5
         with:
           path: ~/.venv
@@ -164,12 +157,27 @@ jobs:
           west update --narrow -o=--depth=1
           west zephyr-export
 
+      # PIP cache key must be computed after west init — requirements.txt lives in zephyr/
+      - name: 📦 Restore PIP Requirements
+        id: cache-pip
+        uses: actions/cache/restore@v5
+        with:
+          path: ~/.venv
+          key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
+
       - name: 🐍 Install Zephyr Python Requirements
         id: install-pip
         if: steps.cache-pip.outputs.cache-hit != 'true'
         run: |
           cd zephyr-workspace
           ~/.venv/bin/pip install -r zephyr/scripts/requirements.txt
+
+      - name: 📦 Save PIP Requirements
+        if: steps.cache-pip.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.venv
+          key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
 
       - name: 📦 Cache Repository
         id: cache-repository
