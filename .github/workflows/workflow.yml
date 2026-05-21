@@ -157,7 +157,7 @@ jobs:
           west update --narrow -o=--depth=1
           west zephyr-export
 
-      # PIP cache key must be computed after west init — requirements.txt lives in zephyr/
+      # PIP cache key must be computed after west init; requirements.txt lives in zephyr/
       - name: 📦 Restore PIP Requirements
         id: cache-pip
         uses: actions/cache/restore@v5
@@ -270,7 +270,28 @@ jobs:
         with:
           path: ~/.venv
           key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
-          fail-on-cache-miss: true
+
+      - name: 📦 Restore Python venv (base)
+        id: restore-venv
+        if: steps.restore-pip.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v5
+        with:
+          path: ~/.venv
+          key: venv-${{ env.ZEPHYR_SDK_VERSION }}
+
+      - name: 🐍 Setup Python venv + West
+        id: setup-venv
+        if: ${{ steps.restore-pip.outputs.cache-hit != 'true' && steps.restore-venv.outputs.cache-hit != 'true' }}
+        run: |
+          python3 -m venv ~/.venv
+          ~/.venv/bin/pip install west ninja
+
+      - name: 🐍 Install Zephyr Python Requirements
+        id: install-pip
+        if: steps.restore-pip.outputs.cache-hit != 'true'
+        run: |
+          cd zephyr-workspace
+          ~/.venv/bin/pip install -r zephyr/scripts/requirements.txt
 
       - name: ♻️ Register Zephyr Workspace
         id: register-west
