@@ -1076,7 +1076,14 @@ Examples:
         print(f"\n{'='*60}")
         print(f"  Update Plan:")
         for bt, ids in board_groups.items():
-            print(f"    Board '{bt}': trackers {ids}")
+            if "nrf52833" in bt:
+                mp = 1
+            elif "nrf52840" in bt:
+                mp = 2
+            else:
+                mp = 2
+            batches = (len(ids) + mp - 1) // mp
+            print(f"    Board '{bt}': trackers {ids} (max {mp} parallel, {batches} batch{'es' if batches > 1 else ''})")
         if len(board_groups) > 1:
             print(f"    ({len(board_groups)} board groups, will update sequentially)")
         print(f"{'='*60}")
@@ -1095,13 +1102,19 @@ Examples:
         # same board trackers in parallel)
         all_success = True
         for board_target, group_ids in board_groups.items():
-            # Limit to 4 parallel per group
-            for i in range(0, len(group_ids), 4):
-                batch = group_ids[i:i+4]
+            # Determine max parallel based on chip type
+            if "nrf52833" in board_target:
+                max_parallel = 1
+            elif "nrf52840" in board_target:
+                max_parallel = 2
+            else:
+                max_parallel = 2  # default conservative limit
+            for i in range(0, len(group_ids), max_parallel):
+                batch = group_ids[i:i+max_parallel]
                 success = do_update(client, batch, firmware, board_target)
                 if not success:
                     all_success = False
-                if i + 4 < len(group_ids):
+                if i + max_parallel < len(group_ids):
                     time.sleep(2.0)  # Brief pause between batches
 
         if all_success:
