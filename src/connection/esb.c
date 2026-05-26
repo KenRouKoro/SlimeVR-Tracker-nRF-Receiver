@@ -32,6 +32,7 @@
 #include "hid.h"
 #include "system/system.h"
 #include "data_collect.h"
+#include "esb_ota.h"
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
@@ -1076,10 +1077,33 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 		ack_payload->data[ESB_PONG_LEN - 1] =
 			crc8_ccitt(0x07, ack_payload->data, ESB_PONG_LEN - 1);
 		*has_ack_payload = true;
+
+		/* If OTA session has a pending command for this tracker
+		 * (e.g., BEGIN before tracker enters OTA mode), override
+		 * the standard PONG with the OTA payload. */
+		if (esb_ota_relay_is_active() &&
+		    esb_ota_relay_is_target(tracker_id)) {
+			bool ota_has_ack = false;
+			esb_ota_relay_fill_ack(tracker_id, pipe_id,
+					       ack_payload, &ota_has_ack,
+					       NULL, 0);
+			if (ota_has_ack) {
+				*has_ack_payload = true;
+			}
+		}
 		return;
 	}
 
 	/* Other packet types: no ACK payload, handled by event_handler */
+
+	/* ---- OTA status/poll packets from tracker in OTA mode ---- */
+	if (data_length >= 2 && pdu_data[0] == ESB_OTA_STATUS_TYPE) {
+		uint8_t tracker_id = pdu_data[1];
+		esb_ota_relay_fill_ack(tracker_id, pipe_id,
+				       ack_payload, has_ack_payload,
+				       pdu_data, data_length);
+		return;
+	}
 
 	/* ---- Raw data ARQ (type 0x10, data collection active) ---- */
 	if (data_length >= 4 && pdu_data[0] == ESB_RAW_IMU_TYPE) {
@@ -1597,6 +1621,14 @@ void event_handler(struct esb_evt const *event)
 					/* PONG is now built by ack_handler in radio ISR context.
 					 * event_handler only needs to track sequence state. */
 					last_pong_queued_counter[tracker_id] = counter;
+				} else {
+					/* Not a PING packet — check for OTA STATUS (same length) */
+					uint8_t pkt_type = rx_payload.data[0];
+					if (pkt_type == ESB_OTA_STATUS_TYPE ||
+					    pkt_type == ESB_OTA_FW_INFO_TYPE) {
+						esb_ota_relay_process_tracker_packet(
+							rx_payload.data, rx_payload.length);
+					}
 				}
 			} break;
 			case 17: // 16 bytes data + 1 byte sequence number
@@ -1649,12 +1681,20 @@ void event_handler(struct esb_evt const *event)
 			} break;
 			default:
 			{
+				/* OTA packets from tracker (status, firmware info) */
+				uint8_t pkt_type = rx_payload.data[0];
+				if (pkt_type == ESB_OTA_STATUS_TYPE ||
+				    pkt_type == ESB_OTA_FW_INFO_TYPE) {
+					esb_ota_relay_process_tracker_packet(
+						rx_payload.data, rx_payload.length);
+					break;
+				}
+
 				/* Raw data collection packets (types 0x10-0x12): variable length.
 				 * Forward raw payload to CDC for PC-side data collection.
 				 * Duplicate raw IMU packets (same tracker+sequence) are
 				 * dropped since trackers send each sample twice for
 				 * redundancy in noack mode. */
-				uint8_t pkt_type = rx_payload.data[0];
 				if (pkt_type == ESB_RAW_IMU_TYPE ||
 				    pkt_type == ESB_RAW_MAG_TYPE ||
 				    pkt_type == ESB_RAW_META_TYPE) {
@@ -2369,6 +2409,18 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 			break;
 		case ESB_PONG_FLAG_DATA_COLLECT_OFF:
 			cmd_name = "DATA_COLLECT_OFF";
+			break;
+		case ESB_PONG_FLAG_OTA_QUERY_INFO:
+			cmd_name = "OTA_QUERY_INFO";
+			break;
+		case ESB_PONG_FLAG_OTA_ABORT:
+			cmd_name = "OTA_ABORT";
+			break;
+		case ESB_PONG_FLAG_OTA_SUPPRESS:
+			cmd_name = "OTA_SUPPRESS";
+			break;
+		case ESB_PONG_FLAG_OTA_UNSUPPRESS:
+			cmd_name = "OTA_UNSUPPRESS";
 			break;
 		}
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", cmd_name, command_flag, tracker_id);
