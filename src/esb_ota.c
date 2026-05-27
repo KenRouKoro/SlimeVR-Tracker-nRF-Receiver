@@ -67,7 +67,7 @@ LOG_MODULE_REGISTER(esb_ota_relay, LOG_LEVEL_INF);
  * No per-tracker read cursor (ring_tail) is needed.
  */
 struct ota_tx_entry {
-	uint8_t data[48];
+	uint8_t data[64];
 	uint8_t length;
 };
 
@@ -77,7 +77,7 @@ struct ota_per_tracker {
 	volatile uint8_t status;             /* Last status from this tracker */
 	volatile uint16_t next_seq;          /* Last confirmed next_seq from STATUS */
 	volatile uint8_t pending_cmd_type;   /* 0 = none */
-	uint8_t pending_cmd_data[48];
+	uint8_t pending_cmd_data[64];
 	volatile uint8_t pending_cmd_len;
 	volatile uint32_t pending_cmd_set_ticks;  /* k_uptime_ticks() when cmd was queued */
 	volatile uint32_t pending_cmd_send_count; /* Times sent in ACK (for diagnostics) */
@@ -108,7 +108,7 @@ static struct {
 /* ── FW_INFO deferred send (ISR → thread context) ───────────────── */
 
 static struct {
-	uint8_t data[48];
+	uint8_t data[66];
 	uint8_t len;
 	uint8_t tracker_id;
 	bool pending;
@@ -129,7 +129,7 @@ static void fw_info_send_work_handler(struct k_work *work)
 
 	LOG_INF("OTA: Sending FW_INFO chunks for tracker %u", tracker_id);
 
-	for (int chunk = 0; chunk < 4; chunk++) {
+	for (int chunk = 0; chunk < 6; chunk++) {
 		uint8_t hid_report[16] = {0};
 		hid_report[0] = HID_OTA_FW_INFO;
 		hid_report[1] = tracker_id;
@@ -361,21 +361,21 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 		sys_put_be16(total_packets, &begin_pkt[10]);
 		begin_pkt[12] = proto_ver;
 		strncpy((char *)&begin_pkt[13], board_target, OTA_BOARD_TARGET_MAX - 1);
-		/* Forward flash base address (bytes 45-46 from HID report) */
-		if (len >= 47) {
-			begin_pkt[45] = data[45];
-			begin_pkt[46] = data[46];
+		/* Forward flash base address (bytes 61-62 from HID report) */
+		if (len >= 63) {
+			begin_pkt[61] = data[61];
+			begin_pkt[62] = data[62];
 		}
 
 		/* CRC-8 */
 		uint8_t crc = 0;
-		for (int i = 0; i < 47; i++) {
+		for (int i = 0; i < 63; i++) {
 			crc ^= begin_pkt[i];
 			for (int j = 0; j < 8; j++) {
 				crc = (crc & 0x80) ? ((crc << 1) ^ 0x07) : (crc << 1);
 			}
 		}
-		begin_pkt[47] = crc;
+		begin_pkt[63] = crc;
 
 		memcpy(t->pending_cmd_data, begin_pkt, OTA_BEGIN_PACKET_SIZE);
 		t->pending_cmd_len = OTA_BEGIN_PACKET_SIZE;
@@ -417,8 +417,8 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 		/* Sequence number: data[2-3] */
 		entry->data[2] = data[2];
 		entry->data[3] = data[3];
-		/* Firmware data: data[4..47] → entry->data[4..47] */
-		size_t payload_len = (len > 48) ? 44 : (len - 4);
+		/* Firmware data: data[4..] → entry->data[4..] */
+		size_t payload_len = (len >= OTA_DATA_HEADER_SIZE) ? (len - OTA_DATA_HEADER_SIZE) : 0;
 		if (payload_len > OTA_DATA_MAX_PAYLOAD) {
 			payload_len = OTA_DATA_MAX_PAYLOAD;
 		}
@@ -529,7 +529,13 @@ void esb_ota_relay_fill_ack(uint8_t tracker_id, uint32_t pipe_id,
 	/* Priority 1: pending command (BEGIN, VERIFY, ACTIVATE)
 	 * Commands are retried in every ACK until the tracker confirms
 	 * receipt (status change) or a 10-second timeout expires.
-	 * This prevents silent loss when a single ACK is missed. */
+	 * This prevents silent loss when a single ACK is missed.
+	 *
+	 * Exception: VERIFY/ACTIVATE must NOT block DATA delivery.
+	 * The RAM engine only processes DATA packets (type 0x20) and
+	 * ignores all other types.  If VERIFY is sent while the tracker
+	 * still needs DATA, the tracker never receives it → deadlock.
+	 * Defer VERIFY/ACTIVATE when the ring has data for this tracker. */
 	if (t->pending_cmd_type != 0) {
 		/* Timeout: stop retrying after 10 seconds */
 		uint32_t elapsed = (uint32_t)k_uptime_ticks() - t->pending_cmd_set_ticks;
@@ -539,15 +545,33 @@ void esb_ota_relay_fill_ack(uint8_t tracker_id, uint32_t pipe_id,
 			return;
 		}
 
-		ack_payload->pipe = pipe_id;
-		ack_payload->length = t->pending_cmd_len;
-		ack_payload->noack = false;
-		memcpy(ack_payload->data, t->pending_cmd_data, t->pending_cmd_len);
-		t->pending_cmd_send_count++;
-		/* Don't clear pending_cmd_type — keep retrying until
-		 * tracker confirms via OTA_STATUS or timeout expires. */
-		*has_ack = true;
-		return;
+		/* For VERIFY/ACTIVATE: check if ring has DATA the tracker needs.
+		 * If so, skip the command and fall through to send DATA instead. */
+		bool defer_cmd = false;
+		if (t->pending_cmd_type != ESB_OTA_BEGIN_TYPE &&
+		    rx_data != NULL && rx_len >= 5 &&
+		    rx_data[0] == ESB_OTA_STATUS_TYPE) {
+			uint16_t ns = sys_get_be16(&rx_data[3]);
+			if ((uint32_t)ns < ota_relay.ring_head) {
+				uint32_t idx = ns & OTA_TX_RING_MASK;
+				if (sys_get_be16(&ota_relay.ring[idx].data[2]) == ns) {
+					defer_cmd = true;
+				}
+			}
+		}
+
+		if (!defer_cmd) {
+			ack_payload->pipe = pipe_id;
+			ack_payload->length = t->pending_cmd_len;
+			ack_payload->noack = false;
+			memcpy(ack_payload->data, t->pending_cmd_data, t->pending_cmd_len);
+			t->pending_cmd_send_count++;
+			/* Don't clear pending_cmd_type — keep retrying until
+			 * tracker confirms via OTA_STATUS or timeout expires. */
+			*has_ack = true;
+			return;
+		}
+		/* defer_cmd == true: fall through to DATA section */
 	}
 
 	/* Priority 2: data indexed by tracker's next_seq from STATUS.
@@ -699,8 +723,8 @@ void esb_ota_relay_process_tracker_packet(const uint8_t *data, size_t len)
 
 		/* Defer to system work queue so we can sleep between chunks.
 		 * This avoids HID FIFO overflow when called from ESB ISR. */
-		memcpy(fw_info_pending.data, data, MIN(len, 48));
-		fw_info_pending.len = MIN(len, 48);
+		memcpy(fw_info_pending.data, data, MIN(len, 66));
+		fw_info_pending.len = MIN(len, 66);
 		fw_info_pending.tracker_id = tracker_id;
 		fw_info_pending.pending = true;
 		k_work_submit(&fw_info_send_work);

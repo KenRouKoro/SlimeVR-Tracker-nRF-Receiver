@@ -38,7 +38,7 @@
 #define ESB_OTA_ACTIVATE_TYPE   0x25
 
 #define OTA_DATA_HEADER_SIZE    4
-#define OTA_DATA_MAX_PAYLOAD    44
+#define OTA_DATA_MAX_PAYLOAD    60
 
 #define OTA_STATUS_IDLE             0x00
 #define OTA_STATUS_READY            0x01
@@ -55,8 +55,8 @@
 #define OTA_STATUS_TIMEOUT          0x15
 
 #define OTA_PROTOCOL_VERSION    1
-#define OTA_BOARD_TARGET_MAX    32
-#define OTA_BEGIN_PACKET_SIZE   48
+#define OTA_BOARD_TARGET_MAX    48
+#define OTA_BEGIN_PACKET_SIZE   64
 
 /* HID OTA report types (PC ↔ Receiver) */
 #define HID_OTA_QUERY_INFO      0xF0
@@ -71,10 +71,10 @@
 /*
  * Seq-indexed ring buffer for OTA data packets (HID → ESB ACK).
  * Must be power of 2. Indexed by seq number: ring[seq & MASK].
- * 256 packets × 48 bytes = 12 KB (shared by all targets).
+ * 128 packets × 64 bytes = 8 KB (shared by all targets).
  * Retransmission is automatic: tracker's next_seq indexes the buffer.
  */
-#define OTA_TX_RING_SIZE        256
+#define OTA_TX_RING_SIZE        128
 #define OTA_TX_RING_MASK        (OTA_TX_RING_SIZE - 1)
 
 /* Maximum number of trackers updated in parallel */

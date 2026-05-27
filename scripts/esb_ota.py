@@ -96,9 +96,9 @@ TERMINAL_STATUSES = {
 # ── OTA Protocol Constants ──────────────────────────────────────────
 
 OTA_PROTOCOL_VERSION = 1
-OTA_DATA_MAX_PAYLOAD = 44  # Max firmware bytes per data packet
-OTA_BOARD_TARGET_MAX = 32
-RING_BUFFER_SIZE     = 255  # Receiver ring buffer capacity
+OTA_DATA_MAX_PAYLOAD = 60  # Max firmware bytes per data packet
+OTA_BOARD_TARGET_MAX = 48
+RING_BUFFER_SIZE     = 127  # Receiver ring buffer capacity
 
 
 # ── UF2 Parser ──────────────────────────────────────────────────────
@@ -367,9 +367,9 @@ class OTAClient:
         pkt[12] = OTA_PROTOCOL_VERSION
         target_bytes = board_target.encode("utf-8")[:OTA_BOARD_TARGET_MAX - 1]
         pkt[13 : 13 + len(target_bytes)] = target_bytes
-        # Bytes 45-46: flash_base_address >> 12 (page-aligned, big-endian)
+        # Bytes 61-62: flash_base_address >> 12 (page-aligned, big-endian)
         if flash_base > 0:
-            struct.pack_into(">H", pkt, 45, flash_base >> 12)
+            struct.pack_into(">H", pkt, 61, flash_base >> 12)
         self._write(bytes(pkt))
 
     def send_data(self, tracker_id: int, seq: int, data: bytes):
@@ -421,16 +421,16 @@ class OTAClient:
 
     @staticmethod
     def parse_fw_info(chunks: list[bytes]) -> dict:
-        """Parse FW_INFO HID IN reports (4 chunks → 48-byte info)."""
-        info_data = bytearray(48)
+        """Parse FW_INFO HID IN reports (6 chunks → 66-byte info)."""
+        info_data = bytearray(66)
         for chunk in chunks:
             if len(chunk) < 3 or chunk[0] != HID_OTA_FW_INFO:
                 continue
             idx = chunk[2]
-            if idx > 3:
+            if idx > 5:
                 continue
             offset = 2 + idx * 13  # Skip type+id in original ESB packet
-            copy_len = min(13, 48 - offset)
+            copy_len = min(13, 66 - offset)
             if copy_len > 0:
                 info_data[offset : offset + copy_len] = chunk[3 : 3 + copy_len]
 
@@ -456,13 +456,13 @@ class OTAClient:
         fw_size = struct.unpack_from("<I", info_data, 9)[0]
         bl_type = info_data[13]
         proto_ver = info_data[14]
-        board_end = info_data.find(0, 15, 45)
+        board_end = info_data.find(0, 15, 63)
         if board_end < 0:
-            board_end = 45
+            board_end = 63
         board_target = info_data[15:board_end].decode("utf-8", errors="replace")
 
-        # Flash base address (bytes 45-46, page-aligned: value << 12)
-        flash_base_raw = struct.unpack_from(">H", info_data, 45)[0]
+        # Flash base address (bytes 63-64, page-aligned: value << 12)
+        flash_base_raw = struct.unpack_from(">H", info_data, 63)[0]
         flash_base = flash_base_raw << 12
 
         bl_types = {0: "none", 1: "adafruit_uf2", 2: "mcuboot"}
@@ -535,10 +535,10 @@ def do_query_info(client: OTAClient, tracker_id: int, quiet: bool = False):
         print(f"\nQuerying firmware info for tracker {tracker_id}...")
     client.query_info(tracker_id)
 
-    # Collect FW_INFO chunks (4 expected)
+    # Collect FW_INFO chunks (6 expected)
     chunks = []
     deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and len(chunks) < 4:
+    while time.monotonic() < deadline and len(chunks) < 6:
         reports = client._read_ota_reports(timeout_ms=500)
         for r in reports:
             if r[0] == HID_OTA_FW_INFO and r[1] == tracker_id:
@@ -552,9 +552,9 @@ def do_query_info(client: OTAClient, tracker_id: int, quiet: bool = False):
             print("       Make sure the tracker is connected and responding.")
         return None
 
-    if len(chunks) < 3:
+    if len(chunks) < 5:
         if not quiet:
-            print(f"  Warning: Only received {len(chunks)}/4 FW_INFO chunks")
+            print(f"  Warning: Only received {len(chunks)}/6 FW_INFO chunks")
 
     info = OTAClient.parse_fw_info(chunks)
     if not quiet:
@@ -641,8 +641,8 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
 
     BURST_SIZE = 48  # max packets per burst before checking status
     # Max packets in-flight (PC sent but tracker hasn't confirmed).
-    # Must be < receiver ring buffer size (256) to prevent ring overflow.
-    MAX_IN_FLIGHT = RING_BUFFER_SIZE - 16  # 239
+    # Must be < receiver ring buffer size (128) to prevent ring overflow.
+    MAX_IN_FLIGHT = RING_BUFFER_SIZE - 16  # 111
     warmup = True  # start slow until we get first STATUS from tracker
     max_attempts = 5  # max gap-fill re-stream attempts
     attempt = 0
