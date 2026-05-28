@@ -681,7 +681,7 @@ void esb_ota_relay_process_tracker_packet(const uint8_t *data, size_t len)
 		bool status_changed = (status != prev_status);
 
 		int64_t now = k_uptime_get();
-		bool throttle_due = (now - t->last_hid_forward_time >= 200);
+		bool throttle_due = (now - t->last_hid_forward_time >= 30);
 
 		if (status_changed || is_terminal || throttle_due) {
 			t->last_hid_forward_time = now;

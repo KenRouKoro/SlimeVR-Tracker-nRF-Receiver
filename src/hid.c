@@ -24,6 +24,7 @@
 #include "hid.h"
 #include "connection/esb.h"
 #include "esb_ota.h"
+#include "receiver_ota.h"
 
 #include <limits.h>
 #include <zephyr/kernel.h>
@@ -412,8 +413,13 @@ static void read_report(struct k_work *work)
 			/* Dispatch HID OUT reports */
 			uint8_t report_type = ep_read_buffer[0];
 			if (report_type >= 0xF0 && report_type <= 0xF7) {
-				/* OTA command from PC */
-				esb_ota_relay_process_hid(ep_read_buffer, read);
+				if (read >= 2 && ep_read_buffer[1] == RECEIVER_OTA_ID) {
+					/* Receiver self-OTA */
+					receiver_ota_process_hid(ep_read_buffer, read);
+				} else {
+					/* Tracker relay OTA */
+					esb_ota_relay_process_hid(ep_read_buffer, read);
+				}
 			}
 		}
 	}

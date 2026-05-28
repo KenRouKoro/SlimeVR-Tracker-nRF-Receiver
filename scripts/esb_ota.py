@@ -99,6 +99,7 @@ OTA_PROTOCOL_VERSION = 1
 OTA_DATA_MAX_PAYLOAD = 60  # Max firmware bytes per data packet
 OTA_BOARD_TARGET_MAX = 48
 RING_BUFFER_SIZE     = 127  # Receiver ring buffer capacity
+RECEIVER_OTA_ID      = 0xFE  # tracker_id for receiver self-OTA
 
 
 # ── UF2 Parser ──────────────────────────────────────────────────────
@@ -186,6 +187,104 @@ def parse_uf2(path: Path, flash_offset: int = 0x1000) -> FirmwareImage:
         board_target="",
         crc32=crc,
     )
+
+
+# ── Intel HEX Parser ───────────────────────────────────────────────
+
+def parse_hex(path: Path, flash_offset: int = 0x1000) -> FirmwareImage:
+    """Parse an Intel HEX file and extract the firmware binary.
+
+    Supports record types 00 (data), 01 (EOF), 02 (extended segment),
+    04 (extended linear address). Extracts contiguous app image
+    starting from flash_offset.
+    """
+    records: list[tuple[int, bytes]] = []
+    base_addr = 0  # Extended address (upper 16 bits)
+
+    with open(path, 'r') as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line[0] != ':':
+                continue
+            # Parse Intel HEX record
+            raw = bytes.fromhex(line[1:])
+            if len(raw) < 5:
+                raise ValueError(f"Line {line_no}: record too short")
+            byte_count = raw[0]
+            address = (raw[1] << 8) | raw[2]
+            rec_type = raw[3]
+            data = raw[4:4 + byte_count]
+            checksum = raw[4 + byte_count]
+
+            # Verify checksum
+            calc_sum = sum(raw[:4 + byte_count]) & 0xFF
+            calc_check = (~calc_sum + 1) & 0xFF
+            if checksum != calc_check:
+                raise ValueError(f"Line {line_no}: checksum mismatch "
+                                 f"(got 0x{checksum:02X}, expected 0x{calc_check:02X})")
+
+            if rec_type == 0x00:  # Data record
+                full_addr = base_addr + address
+                if full_addr >= flash_offset:
+                    records.append((full_addr, data))
+            elif rec_type == 0x01:  # EOF
+                break
+            elif rec_type == 0x02:  # Extended segment address
+                base_addr = ((data[0] << 8) | data[1]) << 4
+            elif rec_type == 0x04:  # Extended linear address
+                base_addr = ((data[0] << 8) | data[1]) << 16
+            # Ignore other types (03, 05)
+
+    if not records:
+        raise ValueError("No application data found in HEX file")
+
+    # Sort by address and create contiguous image
+    records.sort(key=lambda r: r[0])
+    base = records[0][0]
+    end = records[-1][0] + len(records[-1][1])
+    image_size = end - base
+
+    # Allocate and fill (0xFF for gaps)
+    image = bytearray(b"\xFF" * image_size)
+    for addr, data in records:
+        offset = addr - base
+        image[offset : offset + len(data)] = data
+
+    image_bytes = bytes(image)
+    crc = zlib.crc32(image_bytes) & 0xFFFFFFFF
+
+    print(f"HEX: {len(records)} data records")
+    print(f"     Base: 0x{base:08X}, Size: {image_size} bytes ({image_size/1024:.1f} KB)")
+    print(f"     CRC32: 0x{crc:08X}")
+
+    return FirmwareImage(
+        data=image_bytes,
+        base_address=base,
+        board_target="",
+        crc32=crc,
+    )
+
+
+def parse_firmware(path: Path, flash_offset: int = 0x1000) -> FirmwareImage:
+    """Auto-detect firmware format (UF2 or HEX) and parse."""
+    suffix = path.suffix.lower()
+    if suffix == '.uf2':
+        return parse_uf2(path, flash_offset)
+    elif suffix in ('.hex', '.ihex'):
+        return parse_hex(path, flash_offset)
+    else:
+        # Try to detect by content
+        with open(path, 'rb') as f:
+            magic = f.read(4)
+        if magic == b'UF2\n' or (len(magic) >= 4 and
+                struct.unpack_from("<I", magic, 0)[0] == UF2_MAGIC_START0):
+            return parse_uf2(path, flash_offset)
+        # Assume Intel HEX if it starts with ':'
+        with open(path, 'r') as f:
+            first_line = f.readline().strip()
+        if first_line.startswith(':'):
+            return parse_hex(path, flash_offset)
+        raise ValueError(f"Unknown firmware format: {path.suffix}")
 
 
 # ── HID Communication ──────────────────────────────────────────────
@@ -465,7 +564,7 @@ class OTAClient:
         flash_base_raw = struct.unpack_from(">H", info_data, 63)[0]
         flash_base = flash_base_raw << 12
 
-        bl_types = {0: "none", 1: "adafruit_uf2", 2: "mcuboot"}
+        bl_types = {0: "none", 1: "adafruit_uf2", 2: "nrf5_opendfu"}
 
         return {
             "version": f"{major}.{minor}.{patch}",
@@ -871,6 +970,159 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
     return success_count > 0
 
 
+# ── Receiver Self-OTA ───────────────────────────────────────────────
+
+def do_receiver_query_info(client: OTAClient) -> dict | None:
+    """Query and display firmware info from the receiver itself."""
+    print(f"\nQuerying receiver firmware info...")
+    client.query_info(RECEIVER_OTA_ID)
+
+    chunks = []
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and len(chunks) < 6:
+        reports = client._read_ota_reports(timeout_ms=500)
+        for r in reports:
+            if r[0] == HID_OTA_FW_INFO and r[1] == RECEIVER_OTA_ID:
+                chunks.append(r)
+                print(f"  [chunk {r[2]}] data={r.hex()}")
+
+    if not chunks:
+        print("Error: No firmware info response from receiver.")
+        return None
+
+    if len(chunks) < 5:
+        print(f"  Warning: Only received {len(chunks)}/6 FW_INFO chunks")
+
+    info = OTAClient.parse_fw_info(chunks)
+    print(f"\n  Firmware Version: {info['version']}")
+    print(f"  Build Date:      {info['build_date']}")
+    print(f"  Firmware Size:   {info['firmware_size']} bytes")
+    print(f"  Bootloader:      {info['bootloader']}")
+    print(f"  OTA Protocol:    v{info['protocol_version']}")
+    print(f"  Board Target:    {info['board_target']}")
+    print(f"  Flash Base:      0x{info['flash_base']:08X}")
+    if info.get("bootloader") == "nrf5_opendfu":
+        print(f"\n  ⚠ nRF5 OpenDFU bootloader: self-OTA not available (ACL flash protection).")
+        print(f"    Update this receiver via SWD or DFU instead.")
+    return info
+
+
+def do_receiver_update(client: OTAClient, firmware: FirmwareImage,
+                       board_target: str):
+    """Perform OTA update on the receiver itself.
+
+    Simpler than tracker OTA: no ESB relay, no ring buffer, direct HID transfer.
+    """
+    image_size = len(firmware.data)
+    total_packets = (image_size + OTA_DATA_MAX_PAYLOAD - 1) // OTA_DATA_MAX_PAYLOAD
+
+    print(f"\n{'='*60}")
+    print(f"  Receiver Self-OTA Firmware Update")
+    print(f"  Board Target: {board_target}")
+    print(f"  Image Size:   {image_size} bytes ({image_size/1024:.1f} KB)")
+    print(f"  Flash Base:   0x{firmware.base_address:08X}")
+    print(f"  Packets:      {total_packets}")
+    print(f"  CRC32:        0x{firmware.crc32:08X}")
+    print(f"{'='*60}")
+
+    # ── Step 1: Send BEGIN ───────────────────────────────────────
+    print(f"\n[1/4] Sending BEGIN to receiver...")
+    client.send_begin(RECEIVER_OTA_ID, image_size, firmware.crc32,
+                      total_packets, board_target, firmware.base_address)
+
+    # Wait for READY status
+    status = client.wait_for_status(
+        RECEIVER_OTA_ID,
+        {OTA_STATUS_READY, OTA_STATUS_RECEIVING,
+         OTA_STATUS_BOARD_MISMATCH, OTA_STATUS_SIZE_ERROR, OTA_STATUS_ERROR},
+        timeout_s=10.0,
+    )
+
+    if status is None:
+        print("  Error: No response from receiver")
+        return False
+
+    if status["status"] not in (OTA_STATUS_READY, OTA_STATUS_RECEIVING):
+        print(f"  Error: Receiver rejected OTA ({status['status_name']})")
+        return False
+
+    print(f"  Receiver ready")
+
+    # ── Step 2: Stream DATA packets ─────────────────────────────
+    print(f"\n[2/4] Streaming firmware data to receiver...")
+    start_time = time.monotonic()
+    last_progress = -1
+    receiver_next_seq = 0
+
+    for seq in range(total_packets):
+        offset = seq * OTA_DATA_MAX_PAYLOAD
+        chunk = firmware.data[offset : offset + OTA_DATA_MAX_PAYLOAD]
+        client.send_data(RECEIVER_OTA_ID, seq, chunk)
+
+        # Read status periodically
+        if (seq + 1) % 50 == 0 or seq == total_packets - 1:
+            reports = client._read_ota_reports(timeout_ms=5)
+            for r in reports:
+                if r[0] == HID_OTA_STATUS and r[1] == RECEIVER_OTA_ID:
+                    st = OTAClient.parse_status(r)
+                    if st["status"] in TERMINAL_STATUSES:
+                        print(f"\n  Error: {st['status_name']}")
+                        return False
+                    receiver_next_seq = st["next_seq"]
+
+        # Progress display
+        progress = ((seq + 1) * 100) // total_packets
+        if progress != last_progress:
+            elapsed = time.monotonic() - start_time
+            bytes_sent = min((seq + 1) * OTA_DATA_MAX_PAYLOAD, image_size)
+            speed = bytes_sent / elapsed if elapsed > 0 else 0
+            bar = "█" * (progress // 5) + "░" * (20 - progress // 5)
+            print(f"\r  [{bar}] {progress:3d}% "
+                  f"({bytes_sent/1024:.0f}/{image_size/1024:.0f} KB) "
+                  f"{speed/1024:.1f} KB/s", end="", flush=True)
+            last_progress = progress
+
+    elapsed = time.monotonic() - start_time
+    print(f"\n  Transfer complete: {image_size/1024:.1f} KB in {elapsed:.1f}s "
+          f"({image_size/elapsed/1024:.1f} KB/s)")
+
+    # ── Step 3: Verify CRC32 ────────────────────────────────────
+    print(f"\n[3/4] Requesting CRC32 verification...")
+    time.sleep(0.5)
+    client.send_verify(RECEIVER_OTA_ID)
+
+    status = client.wait_for_status(
+        RECEIVER_OTA_ID,
+        {OTA_STATUS_VERIFY_OK, OTA_STATUS_VERIFY_FAIL, OTA_STATUS_ERROR},
+        timeout_s=30.0,
+    )
+
+    if status is None:
+        print("  Error: No verification response")
+        client.send_abort(RECEIVER_OTA_ID)
+        return False
+
+    if status["status"] != OTA_STATUS_VERIFY_OK:
+        print(f"  Verification FAILED ({status['status_name']})")
+        client.send_abort(RECEIVER_OTA_ID)
+        return False
+
+    print(f"  CRC32 verified OK")
+
+    # ── Step 4: Activate ────────────────────────────────────────
+    print(f"\n[4/4] Activating new firmware...")
+    client.send_activate(RECEIVER_OTA_ID)
+
+    # Receiver will flash-copy and reset — USB will disconnect
+    time.sleep(2.0)
+    print(f"  Receiver is updating and rebooting...")
+    print(f"\n{'='*60}")
+    print("  Receiver OTA update completed!")
+    print("  The receiver should reboot with the new firmware.")
+    print(f"{'='*60}")
+    return True
+
+
 # ── CLI ─────────────────────────────────────────────────────────────
 
 def parse_tracker_ids(value: str) -> list[int]:
@@ -898,6 +1150,9 @@ Examples:
   %(prog)s firmware.uf2 --tracker 0-7           # Range of trackers
   %(prog)s --info --tracker 0
   %(prog)s --abort
+  %(prog)s --receiver-info                       # Query receiver firmware info
+  %(prog)s firmware.uf2 --receiver-update        # OTA update the receiver itself
+  %(prog)s firmware.hex --receiver-update        # Intel HEX format also supported
         """,
     )
     parser.add_argument("firmware", nargs="?", type=Path,
@@ -923,11 +1178,15 @@ Examples:
                         help="Skip CRC32 verification (not recommended)")
     parser.add_argument("--no-activate", action="store_true",
                         help="Don't activate after upload (for testing)")
+    parser.add_argument("--receiver-info", action="store_true",
+                        help="Query firmware info from the receiver itself")
+    parser.add_argument("--receiver-update", action="store_true",
+                        help="OTA update the receiver itself (not trackers)")
 
     args = parser.parse_args()
     tracker_ids = parse_tracker_ids(args.tracker)
 
-    if not args.firmware and not args.info and not args.abort and not args.list and not args.scan:
+    if not args.firmware and not args.info and not args.abort and not args.list and not args.scan and not args.receiver_info and not args.receiver_update:
         parser.print_help()
         sys.exit(1)
 
@@ -1027,13 +1286,64 @@ Examples:
                 do_query_info(client, tid)
             return
 
+        if args.receiver_info:
+            do_receiver_query_info(client)
+            return
+
+        if args.receiver_update:
+            if not args.firmware or not args.firmware.exists():
+                print(f"Error: Firmware file not found: {args.firmware}")
+                sys.exit(1)
+
+            firmware = parse_firmware(args.firmware, args.flash_offset)
+
+            # Query receiver info to get board target
+            if args.board:
+                board_target = args.board
+            else:
+                info = do_receiver_query_info(client)
+                if not info or not info.get("board_target"):
+                    print("Error: Cannot determine receiver board target.")
+                    print("       Use --board to specify manually.")
+                    sys.exit(1)
+                board_target = info["board_target"]
+
+                # Block OTA for nRF5 OpenDFU bootloader (ACL write-protects app region)
+                if info.get("bootloader") == "nrf5_opendfu":
+                    print("\n  ✗ Receiver has nRF5 OpenDFU bootloader — self-OTA is not supported.")
+                    print("    The bootloader sets ACL flash write-protection on the app region,")
+                    print("    preventing in-place firmware copy. Update via SWD or DFU instead.")
+                    sys.exit(1)
+
+                # Validate flash base
+                rcv_base = info.get("flash_base", 0)
+                if rcv_base != 0 and firmware.base_address != rcv_base:
+                    print(f"\n  Firmware base 0x{firmware.base_address:08X} != receiver base 0x{rcv_base:08X}")
+                    print(f"  Re-parsing firmware with flash_offset=0x{rcv_base:08X}...")
+                    firmware = parse_firmware(args.firmware, flash_offset=rcv_base)
+
+            try:
+                resp = input("\n  Proceed with receiver OTA? [y/N] ")
+            except (EOFError, KeyboardInterrupt):
+                print("\nAborted.")
+                return
+
+            if resp.lower() not in ("y", "yes"):
+                print("Aborted.")
+                return
+
+            success = do_receiver_update(client, firmware, board_target)
+            if not success:
+                sys.exit(1)
+            return
+
         # ── Firmware update ──────────────────────────────────────
         if not args.firmware or not args.firmware.exists():
             print(f"Error: Firmware file not found: {args.firmware}")
             sys.exit(1)
 
-        # Parse UF2
-        firmware = parse_uf2(args.firmware, args.flash_offset)
+        # Parse firmware (UF2 or HEX)
+        firmware = parse_firmware(args.firmware, args.flash_offset)
 
         # Query info from all targets and group by board_target
         board_groups: dict[str, list[int]] = {}
@@ -1046,15 +1356,21 @@ Examples:
                 if info and info.get("board_target"):
                     bt = info["board_target"]
 
+                    # Block OTA for nRF5 OpenDFU bootloader trackers
+                    if info.get("bootloader") == "nrf5_opendfu":
+                        print(f"\n  ⚠ Tracker {tid} has nRF5 OpenDFU bootloader — OTA not supported (ACL flash protection).")
+                        print(f"    Update via SWD or DFU instead. Skipping.")
+                        continue
+
                     # Validate flash base address
                     tracker_base = info.get("flash_base", 0)
                     if tracker_base != 0 and firmware.base_address != tracker_base:
                         # Try re-parsing UF2 with tracker's flash base
                         # (handles combined SD+app UF2 images)
-                        print(f"\n  UF2 base 0x{firmware.base_address:08X} != tracker base 0x{tracker_base:08X}")
-                        print(f"  Re-parsing UF2 with flash_offset=0x{tracker_base:08X}...")
+                        print(f"\n  Firmware base 0x{firmware.base_address:08X} != tracker base 0x{tracker_base:08X}")
+                        print(f"  Re-parsing firmware with flash_offset=0x{tracker_base:08X}...")
                         try:
-                            firmware = parse_uf2(args.firmware, flash_offset=tracker_base)
+                            firmware = parse_firmware(args.firmware, flash_offset=tracker_base)
                         except ValueError as e:
                             print(f"\n  ERROR: Cannot extract app from UF2 at offset 0x{tracker_base:08X}: {e}")
                             print(f"    Skipping tracker {tid}.")

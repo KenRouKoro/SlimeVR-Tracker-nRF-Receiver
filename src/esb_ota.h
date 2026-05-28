@@ -57,6 +57,7 @@
 #define OTA_PROTOCOL_VERSION    1
 #define OTA_BOARD_TARGET_MAX    48
 #define OTA_BEGIN_PACKET_SIZE   64
+#define OTA_FW_INFO_PACKET_SIZE 66
 
 /* HID OTA report types (PC ↔ Receiver) */
 #define HID_OTA_QUERY_INFO      0xF0
