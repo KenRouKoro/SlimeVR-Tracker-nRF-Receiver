@@ -287,6 +287,30 @@ def parse_firmware(path: Path, flash_offset: int = 0x1000) -> FirmwareImage:
         raise ValueError(f"Unknown firmware format: {path.suffix}")
 
 
+def looks_like_sd_plus_app(firmware: FirmwareImage, device_base: int) -> bool:
+    """Check if firmware contains SoftDevice + Application.
+
+    Detects by looking for a valid ARM Cortex-M vector table at the
+    device's expected app start address within the firmware image.
+    """
+    if firmware.base_address >= device_base:
+        return False
+    offset = device_base - firmware.base_address
+    if offset + 8 > len(firmware.data):
+        return False
+
+    # Read initial SP and reset vector at device's app base
+    initial_sp = struct.unpack_from("<I", firmware.data, offset)[0]
+    reset_vector = struct.unpack_from("<I", firmware.data, offset + 4)[0]
+
+    # SP should point to RAM (0x20000000 - 0x20040000 for nRF52)
+    sp_valid = 0x20000000 <= initial_sp <= 0x20040000
+    # Reset vector should be in flash at/after device base (odd = Thumb)
+    rv_valid = device_base <= reset_vector < 0x100000 and (reset_vector & 1) == 1
+
+    return sp_valid and rv_valid
+
+
 # ── HID Communication ──────────────────────────────────────────────
 
 def enumerate_receivers() -> list[dict]:
@@ -1318,9 +1342,18 @@ Examples:
                 # Validate flash base
                 rcv_base = info.get("flash_base", 0)
                 if rcv_base != 0 and firmware.base_address != rcv_base:
-                    print(f"\n  Firmware base 0x{firmware.base_address:08X} != receiver base 0x{rcv_base:08X}")
-                    print(f"  Re-parsing firmware with flash_offset=0x{rcv_base:08X}...")
-                    firmware = parse_firmware(args.firmware, flash_offset=rcv_base)
+                    if firmware.base_address > rcv_base:
+                        print(f"\n  ERROR: Firmware base 0x{firmware.base_address:08X} > receiver base 0x{rcv_base:08X}")
+                        print(f"    Target firmware requires SoftDevice that is not present.")
+                        print(f"    Cannot flash this firmware via OTA.")
+                        sys.exit(1)
+                    # firmware.base_address < rcv_base: check if SD+App or pure app
+                    if looks_like_sd_plus_app(firmware, rcv_base):
+                        print(f"\n  Detected SD+App image, extracting app at 0x{rcv_base:08X}...")
+                        firmware = parse_firmware(args.firmware, flash_offset=rcv_base)
+                    else:
+                        print(f"\n  Cross-base update: firmware at 0x{firmware.base_address:08X}, receiver at 0x{rcv_base:08X}")
+                        print(f"  (Transitioning from SoftDevice to no-SoftDevice firmware)")
 
             try:
                 resp = input("\n  Proceed with receiver OTA? [y/N] ")
@@ -1365,20 +1398,24 @@ Examples:
                     # Validate flash base address
                     tracker_base = info.get("flash_base", 0)
                     if tracker_base != 0 and firmware.base_address != tracker_base:
-                        # Try re-parsing UF2 with tracker's flash base
-                        # (handles combined SD+app UF2 images)
-                        print(f"\n  Firmware base 0x{firmware.base_address:08X} != tracker base 0x{tracker_base:08X}")
-                        print(f"  Re-parsing firmware with flash_offset=0x{tracker_base:08X}...")
-                        try:
-                            firmware = parse_firmware(args.firmware, flash_offset=tracker_base)
-                        except ValueError as e:
-                            print(f"\n  ERROR: Cannot extract app from UF2 at offset 0x{tracker_base:08X}: {e}")
+                        if firmware.base_address > tracker_base:
+                            # Firmware expects SoftDevice not present — block
+                            print(f"\n  ERROR: Firmware base 0x{firmware.base_address:08X} > tracker base 0x{tracker_base:08X}")
+                            print(f"    Target firmware requires SoftDevice that is not present.")
                             print(f"    Skipping tracker {tid}.")
                             continue
-                        if firmware.base_address != tracker_base:
-                            print(f"\n  ERROR: Re-parsed UF2 base 0x{firmware.base_address:08X} still != tracker 0x{tracker_base:08X}")
-                            print(f"    Skipping tracker {tid}.")
-                            continue
+                        # firmware.base_address < tracker_base: check if SD+App or pure app
+                        if looks_like_sd_plus_app(firmware, tracker_base):
+                            print(f"\n  Detected SD+App image, extracting app at 0x{tracker_base:08X}...")
+                            try:
+                                firmware = parse_firmware(args.firmware, flash_offset=tracker_base)
+                            except ValueError as e:
+                                print(f"\n  ERROR: Cannot extract app from SD+App image: {e}")
+                                print(f"    Skipping tracker {tid}.")
+                                continue
+                        else:
+                            print(f"\n  Cross-base update: firmware at 0x{firmware.base_address:08X}, tracker at 0x{tracker_base:08X}")
+                            print(f"  (Transitioning from SoftDevice to no-SoftDevice firmware)")
 
                     board_groups.setdefault(bt, []).append(tid)
                 else:

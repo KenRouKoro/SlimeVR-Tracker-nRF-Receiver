@@ -154,6 +154,7 @@ static struct {
 
 	/* Staging area in upper flash */
 	uint32_t staging_base;
+	uint32_t target_flash_base;     /* Destination base address for the new firmware */
 
 	/* Double-buffered page accumulation */
 	uint8_t  page_buf[RCV_OTA_FLASH_PAGE_SIZE];
@@ -397,10 +398,27 @@ static void rcv_ota_handle_begin(const uint8_t *data, size_t len)
 		return;
 	}
 
-	/* Validate flash base */
-	if (flash_base != 0 && flash_base != RCV_OTA_FLASH_BASE) {
-		LOG_ERR("RCV OTA: flash base mismatch (got 0x%X, expected 0x%X)",
+	/* Validate flash base — allow lower or equal base (e.g., SoftDevice → no-SD).
+	 * Block higher base: target firmware expects SoftDevice not present. */
+	if (flash_base != 0 && flash_base < 0x1000) {
+		LOG_ERR("RCV OTA: flash base 0x%X below MBR (minimum 0x1000)", flash_base);
+		rcv_ota.state = RCV_OTA_ERROR;
+		rcv_ota.error_code = OTA_STATUS_SIZE_ERROR;
+		rcv_ota_send_status();
+		return;
+	}
+	if (flash_base != 0 && flash_base > RCV_OTA_FLASH_BASE) {
+		LOG_ERR("RCV OTA: flash base 0x%X > running base 0x%X — "
+			"target firmware requires SoftDevice not present",
 			flash_base, RCV_OTA_FLASH_BASE);
+		rcv_ota.state = RCV_OTA_ERROR;
+		rcv_ota.error_code = OTA_STATUS_SIZE_ERROR;
+		rcv_ota_send_status();
+		return;
+	}
+	if (flash_base != 0 && (flash_base + image_size) > RCV_OTA_FLASH_END) {
+		LOG_ERR("RCV OTA: image at 0x%X + %u exceeds flash end 0x%X",
+			flash_base, image_size, RCV_OTA_FLASH_END);
 		rcv_ota.state = RCV_OTA_ERROR;
 		rcv_ota.error_code = OTA_STATUS_SIZE_ERROR;
 		rcv_ota_send_status();
@@ -429,8 +447,14 @@ static void rcv_ota_handle_begin(const uint8_t *data, size_t len)
 	rcv_ota.total_packets = total_packets;
 	rcv_ota.staging_base = staging_base;
 	rcv_ota.page_buf_flash_addr = staging_base;
+	rcv_ota.target_flash_base = (flash_base != 0) ? flash_base : RCV_OTA_FLASH_BASE;
 	rcv_ota.state = RCV_OTA_READY;
 	memset(rcv_ota.page_buf, 0xFF, sizeof(rcv_ota.page_buf));
+
+	if (rcv_ota.target_flash_base != RCV_OTA_FLASH_BASE) {
+		LOG_WRN("RCV OTA: Cross-base update: running at 0x%X, target at 0x%X",
+			RCV_OTA_FLASH_BASE, rcv_ota.target_flash_base);
+	}
 
 	LOG_INF("RCV OTA: staging at 0x%05X (%u pages)", staging_base, image_pages);
 
@@ -924,7 +948,7 @@ static void rcv_ota_flash_copy_from_ram(const struct flash_copy_params *p)
 static void rcv_ota_activate_and_reset(void)
 {
 	LOG_WRN("RCV OTA: Copying %u bytes from staging 0x%05X to final 0x%05X",
-		rcv_ota.image_size, rcv_ota.staging_base, RCV_OTA_FLASH_BASE);
+		rcv_ota.image_size, rcv_ota.staging_base, rcv_ota.target_flash_base);
 
 	/* Diagnostic: dump ACL regions to identify write-protected areas */
 	volatile uint32_t *acl_base = (volatile uint32_t *)0x4001E800;
@@ -947,7 +971,7 @@ static void rcv_ota_activate_and_reset(void)
 
 	static struct flash_copy_params params;
 	params.src_addr = rcv_ota.staging_base;
-	params.dst_addr = RCV_OTA_FLASH_BASE;
+	params.dst_addr = rcv_ota.target_flash_base;
 	params.size = rcv_ota.image_size;
 	params.page_size = RCV_OTA_FLASH_PAGE_SIZE;
 
