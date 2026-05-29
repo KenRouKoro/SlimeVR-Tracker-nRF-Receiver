@@ -84,6 +84,90 @@ class SensorMetadata:
         )
 
 
+class CalibrationData:
+    """Stores calibration data from type 0x14 packets."""
+
+    def __init__(self):
+        self.accel_BAinv = None
+        self.mag_BAinv = None
+        self.gyro_bias = None
+        self.gyro_sens_scale = None
+        self.tcal_enabled = False
+        self.tcal_num_points = 0
+        self.tcal_temp_min = 0.0
+        self.tcal_temp_max = 0.0
+        self.tcal_correction_offset = None
+        self.tcal_points = []  # list of (temp, bx, by, bz)
+
+    def parse(self, payload: bytes):
+        """Parse a type 0x14 calibration packet. Sub-type at byte[2]."""
+        if len(payload) < 4:
+            return
+        sub_type = payload[2]
+        if sub_type == 0x01:  # ACCEL_CAL
+            if len(payload) >= 51:
+                self.accel_BAinv = list(struct.unpack_from("<12f", payload, 3))
+                print(f"  Calibration: accel BAinv received")
+        elif sub_type == 0x02:  # MAG_CAL
+            if len(payload) >= 51:
+                self.mag_BAinv = list(struct.unpack_from("<12f", payload, 3))
+                print(f"  Calibration: mag BAinv received")
+        elif sub_type == 0x03:  # GYRO_CAL
+            if len(payload) >= 27:
+                self.gyro_bias = list(struct.unpack_from("<3f", payload, 3))
+                self.gyro_sens_scale = list(struct.unpack_from("<3f", payload, 15))
+                print(f"  Calibration: gyro bias + sens received")
+        elif sub_type == 0x04:  # TCAL_STATE
+            if len(payload) >= 26:
+                self.tcal_enabled = bool(payload[3])
+                self.tcal_num_points = struct.unpack_from("<H", payload, 4)[0]
+                self.tcal_temp_min = struct.unpack_from("<f", payload, 6)[0]
+                self.tcal_temp_max = struct.unpack_from("<f", payload, 10)[0]
+                self.tcal_correction_offset = list(struct.unpack_from("<3f", payload, 14))
+                print(
+                    f"  Calibration: T-Cal state (enabled={self.tcal_enabled}, "
+                    f"points={self.tcal_num_points}, "
+                    f"range={self.tcal_temp_min:.0f}-{self.tcal_temp_max:.0f}°C)"
+                )
+        elif sub_type == 0x05:  # TCAL_POINTS
+            if len(payload) >= 23:
+                num_in_chunk = payload[6]
+                for j in range(num_in_chunk):
+                    offset = 7 + j * 16
+                    if offset + 16 <= len(payload):
+                        temp, bx, by, bz = struct.unpack_from("<4f", payload, offset)
+                        self.tcal_points.append((temp, bx, by, bz))
+                if len(self.tcal_points) <= 2:
+                    print(f"  Calibration: T-Cal points receiving...")
+
+    def write_to_file(self, f):
+        """Append calibration data to metadata file."""
+        f.write("\n# Calibration data (from tracker retained memory)\n")
+        if self.accel_BAinv is not None:
+            f.write(f"accel_BAinv={','.join(f'{v:.9g}' for v in self.accel_BAinv)}\n")
+        if self.mag_BAinv is not None:
+            f.write(f"mag_BAinv={','.join(f'{v:.9g}' for v in self.mag_BAinv)}\n")
+        if self.gyro_bias is not None:
+            f.write(f"gyro_bias={','.join(f'{v:.9g}' for v in self.gyro_bias)}\n")
+        if self.gyro_sens_scale is not None:
+            f.write(f"gyro_sens_scale={','.join(f'{v:.9g}' for v in self.gyro_sens_scale)}\n")
+        if self.tcal_enabled:
+            f.write(f"tcal_enabled=1\n")
+            f.write(f"tcal_num_points={self.tcal_num_points}\n")
+            f.write(f"tcal_temp_min={self.tcal_temp_min:.2f}\n")
+            f.write(f"tcal_temp_max={self.tcal_temp_max:.2f}\n")
+            if self.tcal_correction_offset is not None:
+                f.write(f"tcal_correction_offset={','.join(f'{v:.9g}' for v in self.tcal_correction_offset)}\n")
+        if self.tcal_points:
+            f.write(f"tcal_point_count={len(self.tcal_points)}\n")
+            for i, (temp, bx, by, bz) in enumerate(self.tcal_points):
+                f.write(f"tcal_point[{i}]={temp:.4f},{bx:.9g},{by:.9g},{bz:.9g}\n")
+
+    @property
+    def has_data(self):
+        return any([self.accel_BAinv, self.mag_BAinv, self.gyro_bias, self.tcal_enabled, self.tcal_points])
+
+
 def parse_raw_imu(payload: bytes, meta: SensorMetadata):
     """Parse type 0x10 raw IMU packet (float format, no timestamp). Returns a single sample dict."""
     if len(payload) < 42:
@@ -230,6 +314,7 @@ def read_frames(port, baudrate=115200):
 def collect(port, output_path, duration=None):
     """Main data collection loop with incremental file writing."""
     meta = SensorMetadata()
+    cal = CalibrationData()
     start_time = time.time()
     first_sample_time = None
     frame_count = 0
@@ -240,6 +325,7 @@ def collect(port, output_path, duration=None):
     retransmit_count = 0
     gap_count = 0  # sequence gaps never filled (actual loss)
     data_mode = "raw"  # will switch to "gyr_quat" if type 0x13 packets arrive
+    meta_written = False  # metadata file written once on first IMU data
 
     # Reorder buffer for ARQ retransmits
     REORDER_BUF_MAX = 128
@@ -268,26 +354,37 @@ def collect(port, output_path, duration=None):
             if pkt_type == 0x12:  # Metadata
                 meta.parse(esb_payload)
                 print(f"\nMetadata received: {meta}")
-                with open(meta_path, "w") as f:
-                    f.write(f"gyro_range_dps={meta.gyro_range}\n")
-                    f.write(f"accel_range_g={meta.accel_range}\n")
-                    f.write(f"gyro_odr_hz={meta.gyro_odr}\n")
-                    f.write(f"accel_odr_hz={meta.accel_odr}\n")
-                    f.write(f"mag_odr_hz={meta.mag_odr}\n")
-                    f.write(f"imu_id={meta.imu_id}\n")
-                    f.write(f"mag_id={meta.mag_id}\n")
-                    f.write("temp_source=tcal_float_c\n")
-                    f.write(f"data_mode={data_mode}\n")
+
+            elif pkt_type == 0x14:  # Calibration data
+                cal.parse(esb_payload)
 
             elif pkt_type == 0x10 or pkt_type == 0x13:  # Raw IMU or gyrQuat
+                # Detect mode on first packet
+                if pkt_type == 0x13 and data_mode == "raw":
+                    data_mode = "gyr_quat"
+                    csv_file.close()
+                    csv_file = open(csv_path, "w")
+                    csv_file.write("seq,qw,qx,qy,qz,ax,ay,az,mx,my,mz,temp\n")
+
+                # Write metadata file once on first IMU data arrival
+                if meta.received and not meta_written:
+                    meta_written = True
+                    with open(meta_path, "w") as f:
+                        f.write(f"gyro_range_dps={meta.gyro_range}\n")
+                        f.write(f"accel_range_g={meta.accel_range}\n")
+                        f.write(f"gyro_odr_hz={meta.gyro_odr}\n")
+                        f.write(f"accel_odr_hz={meta.accel_odr}\n")
+                        f.write(f"mag_odr_hz={meta.mag_odr}\n")
+                        f.write(f"imu_id={meta.imu_id}\n")
+                        f.write(f"mag_id={meta.mag_id}\n")
+                        f.write("temp_source=tcal_float_c\n")
+                        f.write(f"data_mode={data_mode}\n")
+                        if cal.has_data:
+                            cal.write_to_file(f)
+                    print(f"  Metadata + calibration written to {meta_path}")
+
                 if pkt_type == 0x13:
                     s = parse_raw_imu_quat(esb_payload, meta)
-                    if data_mode == "raw":
-                        # First 0x13 packet — switch mode and rewrite header
-                        data_mode = "gyr_quat"
-                        csv_file.close()
-                        csv_file = open(csv_path, "w")
-                        csv_file.write("seq,qw,qx,qy,qz,ax,ay,az,mx,my,mz,temp\n")
                 else:
                     s = parse_raw_imu(esb_payload, meta)
                 if s:
@@ -363,7 +460,7 @@ def collect(port, output_path, duration=None):
             now = time.time()
             if now - last_status >= 2.0:
                 csv_file.flush()
-                elapsed = now - start_time
+                elapsed = now - (first_sample_time or start_time)
                 period = now - last_status
                 period_samples = sample_count - last_status_samples
                 rate = period_samples / period if period > 0 else 0
@@ -382,7 +479,7 @@ def collect(port, output_path, duration=None):
                 last_status = now
                 last_status_samples = sample_count
 
-            if duration and (now - start_time >= duration):
+            if duration and first_sample_time and (now - first_sample_time >= duration):
                 break
 
     except KeyboardInterrupt:
@@ -403,21 +500,20 @@ def collect(port, output_path, duration=None):
             reorder_buf.clear()
         csv_file.close()
 
-    elapsed = time.time() - start_time
-    data_duration = (time.time() - first_sample_time) if first_sample_time else elapsed
+    data_duration = (time.time() - first_sample_time) if first_sample_time else 0
     print(f"\n\nCollection complete:")
-    print(f"  Duration: {elapsed:.1f}s (data: {data_duration:.1f}s)")
+    print(f"  Duration: {data_duration:.1f}s")
     print(f"  Samples: {sample_count} -> {csv_path}")
     print(f"  Retransmits received: {retransmit_count}")
     total = sample_count + gap_count
     loss_pct = gap_count / total * 100 if total > 0 else 0
     print(f"  Gaps (lost): {gap_count} ({loss_pct:.2f}%)")
-    if meta.received:
-        # Append duration and actual ODR to metadata
+    if meta_written:
         with open(meta_path, "a") as f:
+            f.write(f"\n# Collection summary\n")
             f.write(f"duration_s={data_duration:.3f}\n")
             f.write(f"sample_count={sample_count}\n")
-            f.write(f"data_mode={data_mode}\n")
+            f.write(f"gap_count={gap_count}\n")
         print(f"  Metadata: {meta_path}")
         print(f"  Data mode: {data_mode}")
 

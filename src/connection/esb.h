@@ -81,6 +81,7 @@
 #define ESB_RAW_MAG_TYPE    0x11  // Raw magnetometer data (float, reserved)
 #define ESB_RAW_META_TYPE   0x12  // Metadata (ODR, range, sensor IDs - sent once)
 #define ESB_RAW_IMU_QUAT_TYPE 0x13  // Raw IMU with gyrQuat (52 bytes, packet-loss resistant)
+#define ESB_RAW_CAL_TYPE    0x14  // Extended calibration metadata (sub-typed)
 
 // ESB OTA packet types (used during firmware update over ESB)
 #define ESB_OTA_DATA_TYPE       0x20  // OTA firmware data (receiver → tracker)

@@ -1708,7 +1708,8 @@ void event_handler(struct esb_evt const *event)
 				if (pkt_type == ESB_RAW_IMU_TYPE ||
 				    pkt_type == ESB_RAW_IMU_QUAT_TYPE ||
 				    pkt_type == ESB_RAW_MAG_TYPE ||
-				    pkt_type == ESB_RAW_META_TYPE) {
+				    pkt_type == ESB_RAW_META_TYPE ||
+				    pkt_type == ESB_RAW_CAL_TYPE) {
 					uint8_t tracker_id = rx_payload.data[1];
 					if (tracker_id < stored_trackers &&
 					    data_collect_is_target(tracker_id)) {
