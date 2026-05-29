@@ -1341,6 +1341,9 @@ Examples:
 
                 # Validate flash base
                 rcv_base = info.get("flash_base", 0)
+                if rcv_base == 0 and looks_like_sd_plus_app(firmware, 0x27000):
+                    # Old firmware doesn't report flash_base, but firmware is SD+App
+                    rcv_base = 0x27000
                 if rcv_base != 0 and firmware.base_address != rcv_base:
                     if firmware.base_address > rcv_base:
                         print(f"\n  ERROR: Firmware base 0x{firmware.base_address:08X} > receiver base 0x{rcv_base:08X}")
@@ -1397,6 +1400,9 @@ Examples:
 
                     # Validate flash base address
                     tracker_base = info.get("flash_base", 0)
+                    if tracker_base == 0 and looks_like_sd_plus_app(firmware, 0x27000):
+                        # Old firmware doesn't report flash_base, but firmware is SD+App
+                        tracker_base = 0x27000
                     if tracker_base != 0 and firmware.base_address != tracker_base:
                         if firmware.base_address > tracker_base:
                             # Firmware expects SoftDevice not present — block
