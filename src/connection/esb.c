@@ -1114,8 +1114,9 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 		return;
 	}
 
-	/* ---- Raw data ARQ (type 0x10, data collection active) ---- */
-	if (data_length >= 4 && pdu_data[0] == ESB_RAW_IMU_TYPE) {
+	/* ---- Raw data ARQ (type 0x10/0x13, data collection active) ---- */
+	if (data_length >= 4 &&
+	    (pdu_data[0] == ESB_RAW_IMU_TYPE || pdu_data[0] == ESB_RAW_IMU_QUAT_TYPE)) {
 		uint8_t tracker_id = pdu_data[1];
 		if (data_collect_is_active() &&
 		    data_collect_is_target(tracker_id)) {
@@ -1699,19 +1700,21 @@ void event_handler(struct esb_evt const *event)
 					break;
 				}
 
-				/* Raw data collection packets (types 0x10-0x12): variable length.
+				/* Raw data collection packets (types 0x10-0x13): variable length.
 				 * Forward raw payload to CDC for PC-side data collection.
 				 * Duplicate raw IMU packets (same tracker+sequence) are
 				 * dropped since trackers send each sample twice for
 				 * redundancy in noack mode. */
 				if (pkt_type == ESB_RAW_IMU_TYPE ||
+				    pkt_type == ESB_RAW_IMU_QUAT_TYPE ||
 				    pkt_type == ESB_RAW_MAG_TYPE ||
 				    pkt_type == ESB_RAW_META_TYPE) {
 					uint8_t tracker_id = rx_payload.data[1];
 					if (tracker_id < stored_trackers &&
 					    data_collect_is_target(tracker_id)) {
 						/* Dedup raw IMU by tracker_id + sequence */
-						if (pkt_type == ESB_RAW_IMU_TYPE) {
+						if (pkt_type == ESB_RAW_IMU_TYPE ||
+						    pkt_type == ESB_RAW_IMU_QUAT_TYPE) {
 							static uint8_t last_raw_tracker = 0xFF;
 							static uint16_t last_raw_seq = 0xFFFF;
 							uint16_t seq = sys_get_be16(&rx_payload.data[2]);

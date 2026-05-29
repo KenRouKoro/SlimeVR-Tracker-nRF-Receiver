@@ -104,6 +104,36 @@ def parse_raw_imu(payload: bytes):
     }
 
 
+def parse_raw_imu_quat(payload: bytes):
+    """Parse type 0x13 raw IMU + gyrQuat packet (52 bytes). Returns sample dict."""
+    if len(payload) < 46:
+        return None
+
+    seq = struct.unpack_from(">H", payload, 2)[0]
+    qw, qx, qy, qz = struct.unpack_from("<ffff", payload, 4)
+    ax, ay, az = struct.unpack_from("<fff", payload, 20)
+
+    flags = payload[44]
+    temp_c = None
+    if len(payload) >= 49:
+        tcal_temp_c = struct.unpack_from("<f", payload, 45)[0]
+        if math.isfinite(tcal_temp_c) and -100.0 < tcal_temp_c < 150.0:
+            temp_c = tcal_temp_c
+
+    mag = None
+    if flags & 0x01:
+        mx, my, mz = struct.unpack_from("<fff", payload, 32)
+        mag = (mx, my, mz)
+
+    return {
+        "seq": seq,
+        "gyr_quat": (qw, qx, qy, qz),
+        "accel": (ax, ay, az),
+        "mag": mag,
+        "temp_c": temp_c,
+    }
+
+
 def find_data_hid(device_index=None):
     """Find the SlimeNRF data collection HID interface.
 
@@ -204,6 +234,7 @@ def collect_hid(output_path, duration=None, device_index=None):
 
     csv_file = open(csv_path, "w", encoding="utf-8")
     csv_file.write("seq,gx,gy,gz,ax,ay,az,mx,my,mz,temp\n")
+    data_mode = "raw"  # will switch to "gyr_quat" if type 0x13 packets arrive
 
     def flush_reorder_buf():
         """Write contiguous samples from write_cursor onwards."""
@@ -249,6 +280,8 @@ def collect_hid(output_path, duration=None, device_index=None):
 
             if pkt_type == 0x10:
                 esb_len = 48
+            elif pkt_type == 0x13:
+                esb_len = 52
             elif pkt_type == 0x11:
                 esb_len = 16
             elif pkt_type == 0x12:
@@ -272,9 +305,20 @@ def collect_hid(output_path, duration=None, device_index=None):
                     f.write(f"imu_id={meta.imu_id}\n")
                     f.write(f"mag_id={meta.mag_id}\n")
                     f.write("temp_source=tcal_float_c\n")
+                    f.write(f"data_mode={data_mode}\n")
 
-            elif pkt_type == 0x10:  # Raw IMU
-                s = parse_raw_imu(esb_payload)
+            elif pkt_type == 0x10 or pkt_type == 0x13:  # Raw IMU or gyrQuat
+                if pkt_type == 0x13:
+                    s = parse_raw_imu_quat(esb_payload)
+                    if data_mode == "raw":
+                        # First 0x13 packet — switch mode and rewrite header
+                        data_mode = "gyr_quat"
+                        csv_file.close()
+                        csv_file = open(csv_path, "w", encoding="utf-8")
+                        csv_file.write("seq,qw,qx,qy,qz,ax,ay,az,mx,my,mz,temp\n")
+                else:
+                    s = parse_raw_imu(esb_payload)
+
                 if s:
                     seq = s["seq"]
 
@@ -296,13 +340,24 @@ def collect_hid(output_path, duration=None, device_index=None):
 
                     mag = s.get("mag") or (0.0, 0.0, 0.0)
                     temp = s.get("temp_c") or 0.0
-                    csv_line = (
-                        f"{seq},"
-                        f"{s['gyro'][0]:.6f},{s['gyro'][1]:.6f},{s['gyro'][2]:.6f},"
-                        f"{s['accel'][0]:.6f},{s['accel'][1]:.6f},{s['accel'][2]:.6f},"
-                        f"{mag[0]:.6f},{mag[1]:.6f},{mag[2]:.6f},"
-                        f"{temp:.6f}\n"
-                    )
+
+                    if data_mode == "gyr_quat":
+                        q = s["gyr_quat"]
+                        csv_line = (
+                            f"{seq},"
+                            f"{q[0]:.9f},{q[1]:.9f},{q[2]:.9f},{q[3]:.9f},"
+                            f"{s['accel'][0]:.6f},{s['accel'][1]:.6f},{s['accel'][2]:.6f},"
+                            f"{mag[0]:.6f},{mag[1]:.6f},{mag[2]:.6f},"
+                            f"{temp:.6f}\n"
+                        )
+                    else:
+                        csv_line = (
+                            f"{seq},"
+                            f"{s['gyro'][0]:.6f},{s['gyro'][1]:.6f},{s['gyro'][2]:.6f},"
+                            f"{s['accel'][0]:.6f},{s['accel'][1]:.6f},{s['accel'][2]:.6f},"
+                            f"{mag[0]:.6f},{mag[1]:.6f},{mag[2]:.6f},"
+                            f"{temp:.6f}\n"
+                        )
 
                     reorder_buf[seq] = csv_line
 
