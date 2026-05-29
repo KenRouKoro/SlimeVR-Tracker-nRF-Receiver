@@ -135,27 +135,25 @@ class CalibrationData:
                     print(f"  Calibration: T-Cal points receiving...")
 
     def write_to_file(self, f):
-        """Append calibration data to metadata file."""
+        """Append calibration data to metadata file (vqf_core.py-compatible format)."""
         f.write("\n# Calibration data (from tracker retained memory)\n")
-        if self.accel_BAinv is not None:
-            f.write(f"accel_BAinv={','.join(f'{v:.9g}' for v in self.accel_BAinv)}\n")
-        if self.mag_BAinv is not None:
-            f.write(f"mag_BAinv={','.join(f'{v:.9g}' for v in self.mag_BAinv)}\n")
+        # Accel: split BAinv[12] → bias (row 0) + matrix (rows 1-3)
+        if self.accel_BAinv is not None and len(self.accel_BAinv) == 12:
+            f.write(f"acc_cal_bias={','.join(f'{v:.9g}' for v in self.accel_BAinv[:3])}\n")
+            f.write(f"acc_cal_matrix={','.join(f'{v:.9g}' for v in self.accel_BAinv[3:])}\n")
+        # Mag: split BAinv[12] → bias (row 0) + matrix (rows 1-3)
+        if self.mag_BAinv is not None and len(self.mag_BAinv) == 12:
+            f.write(f"mag_cal_bias={','.join(f'{v:.9g}' for v in self.mag_BAinv[:3])}\n")
+            f.write(f"mag_cal_matrix={','.join(f'{v:.9g}' for v in self.mag_BAinv[3:])}\n")
         if self.gyro_bias is not None:
             f.write(f"gyro_bias={','.join(f'{v:.9g}' for v in self.gyro_bias)}\n")
         if self.gyro_sens_scale is not None:
             f.write(f"gyro_sens_scale={','.join(f'{v:.9g}' for v in self.gyro_sens_scale)}\n")
-        if self.tcal_enabled:
-            f.write(f"tcal_enabled=1\n")
-            f.write(f"tcal_num_points={self.tcal_num_points}\n")
-            f.write(f"tcal_temp_min={self.tcal_temp_min:.2f}\n")
-            f.write(f"tcal_temp_max={self.tcal_temp_max:.2f}\n")
-            if self.tcal_correction_offset is not None:
-                f.write(f"tcal_correction_offset={','.join(f'{v:.9g}' for v in self.tcal_correction_offset)}\n")
+        # T-Cal: compact gyro_tcal format (temp:bx,by,bz;temp:bx,by,bz;...)
         if self.tcal_points:
-            f.write(f"tcal_point_count={len(self.tcal_points)}\n")
-            for i, (temp, bx, by, bz) in enumerate(self.tcal_points):
-                f.write(f"tcal_point[{i}]={temp:.4f},{bx:.9g},{by:.9g},{bz:.9g}\n")
+            entries = [f"{t:.2f}:{bx:.5f},{by:.5f},{bz:.5f}"
+                       for t, bx, by, bz in self.tcal_points]
+            f.write(f"gyro_tcal={';'.join(entries)}\n")
 
     @property
     def has_data(self):
@@ -394,6 +392,7 @@ def collect_hid(output_path, duration=None, device_index=None):
 
             elif pkt_type == 0x14:  # Calibration data
                 cal.parse(esb_payload)
+                print(f"  Cal sub={esb_payload[2]} accel={cal.accel_BAinv is not None} mag={cal.mag_BAinv is not None} gyro={cal.gyro_bias is not None}")
 
             elif pkt_type == 0x10 or pkt_type == 0x13:  # Raw IMU or gyrQuat
                 # Detect mode on first packet
@@ -532,6 +531,10 @@ def collect_hid(output_path, duration=None, device_index=None):
     print(f"  Gaps (lost): {gap_count} ({loss_pct:.2f}%)")
     if meta_written:
         with open(meta_path, "a", encoding="utf-8") as f:
+            # Final calibration write — ensures all late-arriving cal data is saved
+            if cal.has_data:
+                f.write(f"\n# Final calibration (complete)\n")
+                cal.write_to_file(f)
             f.write(f"\n# Collection summary\n")
             f.write(f"duration_s={data_duration:.3f}\n")
             f.write(f"sample_count={sample_count}\n")
