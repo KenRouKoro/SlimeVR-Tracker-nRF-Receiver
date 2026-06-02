@@ -98,6 +98,24 @@ class CalibrationData:
         self.tcal_temp_max = 0.0
         self.tcal_correction_offset = None
         self.tcal_points = []  # list of (temp, bx, by, bz)
+        self._tcal_pending_points = []
+        self._tcal_pending_chunk_idx = -1
+
+    @staticmethod
+    def _is_valid_tcal_point(point):
+        temp, bx, by, bz = point
+        if not all(math.isfinite(v) for v in point):
+            return False
+        return not (temp == 0.0 and bx == 0.0 and by == 0.0 and bz == 0.0)
+
+    @classmethod
+    def _normalize_tcal_points(cls, points):
+        deduped = {}
+        for point in points:
+            if not cls._is_valid_tcal_point(point):
+                continue
+            deduped[f"{point[0]:.2f}"] = point
+        return [deduped[key] for key in sorted(deduped, key=lambda k: float(k))]
 
     def parse(self, payload: bytes):
         """Parse a type 0x14 calibration packet. Sub-type at byte[2]."""
@@ -129,19 +147,40 @@ class CalibrationData:
                     f"points={self.tcal_num_points}, "
                     f"range={self.tcal_temp_min:.0f}-{self.tcal_temp_max:.0f}°C)"
                 )
+                if self.tcal_num_points == 0:
+                    self.tcal_points = []
+                    self._tcal_pending_points = []
+                    self._tcal_pending_chunk_idx = -1
         elif sub_type == 0x05:  # TCAL_POINTS
             if len(payload) >= 23:
+                chunk_idx = payload[3]
+                total_count = struct.unpack_from("<H", payload, 4)[0]
                 num_in_chunk = payload[6]
+                last_chunk_idx = ((total_count - 1) // 2) if total_count > 0 else 0
+                if chunk_idx == 0 or self._tcal_pending_chunk_idx >= chunk_idx:
+                    self._tcal_pending_points = []
                 for j in range(num_in_chunk):
                     offset = 7 + j * 16
                     if offset + 16 <= len(payload):
                         temp, bx, by, bz = struct.unpack_from("<4f", payload, offset)
-                        self.tcal_points.append((temp, bx, by, bz))
-                if len(self.tcal_points) <= 2:
+                        self._tcal_pending_points.append((temp, bx, by, bz))
+                self._tcal_pending_chunk_idx = chunk_idx
+                normalized = self._normalize_tcal_points(self._tcal_pending_points)
+                if not self.tcal_points:
+                    self.tcal_points = normalized
+                    self.tcal_num_points = len(self.tcal_points)
+                if chunk_idx >= last_chunk_idx:
+                    self.tcal_points = normalized
+                    self._tcal_pending_points = []
+                    self._tcal_pending_chunk_idx = -1
+                    self.tcal_num_points = len(self.tcal_points)
+                if len(normalized) <= 2:
                     print(f"  Calibration: T-Cal points receiving...")
 
     def write_to_file(self, f):
         """Append calibration data to metadata file (vqf_core.py-compatible format)."""
+        self.tcal_points = self._normalize_tcal_points(self.tcal_points)
+        self.tcal_num_points = len(self.tcal_points)
         f.write("\n# Calibration data (from tracker retained memory)\n")
         # Accel: split BAinv[12] → bias (row 0) + matrix (rows 1-3)
         if self.accel_BAinv is not None and len(self.accel_BAinv) == 12:
