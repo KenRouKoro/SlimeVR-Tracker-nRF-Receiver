@@ -15,10 +15,10 @@ Binary framing protocol (from receiver):
   [0xAA][0x55][length][payload...][rssi][rx_ticks(4)][CRC-8]
 
 Packet types in payload:
-  0x10: Raw IMU (48 bytes) - float gyro+accel (+optional mag) + T-Cal temp
-  0x11: Raw Mag (17 bytes) - float magnetometer
+  0x10: Raw IMU (48 bytes) - float gyro+accel (+optional body-frame aligned mag) + T-Cal temp
+  0x11: Raw Mag (17 bytes) - float body-frame aligned magnetometer
   0x12: Metadata (48 bytes) - ODR, range, sensor IDs (sent once)
-  0x13: Raw IMU + gyrQuat (52 bytes) - accumulated gyro quaternion + accel/mag
+  0x13: Raw IMU + gyrQuat (52 bytes) - accumulated gyro quaternion + accel/body-frame aligned mag
 
 Output: CSV file with columns depending on mode:
   raw mode:      seq,gx,gy,gz,ax,ay,az,mx,my,mz,temp

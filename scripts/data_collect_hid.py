@@ -18,8 +18,8 @@ HID report format (64 bytes):
   [N+5..63]   zero padding
 
 Packet types in ESB payload (byte 0):
-  0x10: Raw IMU (48 bytes) - float gyro+accel (+optional mag) + T-Cal temp
-  0x11: Raw Mag (17 bytes) - float magnetometer
+  0x10: Raw IMU (48 bytes) - float gyro+accel (+optional body-frame aligned mag) + T-Cal temp
+  0x11: Raw Mag (17 bytes) - float body-frame aligned magnetometer
   0x12: Metadata (48 bytes) - ODR, range, sensor IDs
 
 Output: CSV file with columns: seq,gx,gy,gz,ax,ay,az,mx,my,mz,temp
