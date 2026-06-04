@@ -365,7 +365,7 @@ def collect(port, output_path, duration=None):
     meta_written = False  # metadata file written once on first IMU data
 
     # Reorder buffer for ARQ retransmits
-    REORDER_BUF_MAX = 128
+    REORDER_BUF_MAX = 200  # match receiver raw ARQ stale window before force-flush
     reorder_buf = {}  # seq -> csv_line
     write_cursor = None
 

@@ -810,8 +810,9 @@ static void esb_stats_thread(void)
 #define RAW_ARQ_MAX_GAPS 8
 #define RAW_ARQ_MARKER   0xAA
 /* Maximum sequence distance before a gap is considered stale and unrecoverable.
- * Must be <= tracker's ring buffer size (RAW_RING_SIZE = 512). */
-#define RAW_ARQ_STALE_DISTANCE 400
+ * Keep below the tracker's 256-packet raw ring so requests never target
+ * overwritten slots after ACK/processing latency. */
+#define RAW_ARQ_STALE_DISTANCE 200
 
 static volatile uint16_t raw_arq_expected_seq;
 static volatile bool     raw_arq_seq_initialized;
