@@ -25,11 +25,10 @@
 #include "connection/esb.h"
 #include "esb_ota.h"
 #include "receiver_ota.h"
+#include "usb.h"
 
 #include <limits.h>
 #include <zephyr/kernel.h>
-#include <zephyr/usb/usb_ch9.h>
-#include <zephyr/usb/usbd.h>
 #include <zephyr/usb/class/usbd_hid.h>
 
 static struct k_work report_send;
@@ -49,7 +48,6 @@ atomic_t report_read_index = 0;
 // read_index == write_index -> empty fifo
 // (write_index + 1) % MAX_REPORTS == read_index -> full fifo
 
-static bool configured;
 static const struct device *hdev;
 static ATOMIC_DEFINE(hid_ep_in_busy, 1);
 static bool hid_ready;
@@ -95,68 +93,6 @@ static struct hid_stats_state hid_stats = {
 
 LOG_MODULE_REGISTER(hid_event, LOG_LEVEL_INF);
 
-#define SLIMEVR_USB_STRING_MANUFACTURER_IDX 1U
-#define SLIMEVR_USB_STRING_PRODUCT_IDX 2U
-#define SLIMEVR_USB_STRING_SERIAL_NUMBER_IDX COND_CODE_1(CONFIG_HWINFO, (3U), (0U))
-
-#define SLIMEVR_USBD_DEVICE_DEFINE(device_name, udc_dev, vid, pid)	\
-	static struct usb_device_descriptor				\
-	fs_desc_##device_name = {					\
-		.bLength = sizeof(struct usb_device_descriptor),	\
-		.bDescriptorType = USB_DESC_DEVICE,			\
-		.bcdUSB = sys_cpu_to_le16(USB_SRN_2_0),			\
-		.bDeviceClass = USB_BCC_MISCELLANEOUS,			\
-		.bDeviceSubClass = 2,					\
-		.bDeviceProtocol = 1,					\
-		.bMaxPacketSize0 = USB_CONTROL_EP_MPS,			\
-		.idVendor = vid,					\
-		.idProduct = pid,					\
-		.bcdDevice = sys_cpu_to_le16(USB_BCD_DRN),		\
-		.iManufacturer = SLIMEVR_USB_STRING_MANUFACTURER_IDX,	\
-		.iProduct = SLIMEVR_USB_STRING_PRODUCT_IDX,		\
-		.iSerialNumber = SLIMEVR_USB_STRING_SERIAL_NUMBER_IDX,	\
-		.bNumConfigurations = 0,				\
-	};								\
-	IF_ENABLED(USBD_SUPPORTS_HIGH_SPEED, (				\
-	static struct usb_device_descriptor				\
-	hs_desc_##device_name = {					\
-		.bLength = sizeof(struct usb_device_descriptor),	\
-		.bDescriptorType = USB_DESC_DEVICE,			\
-		.bcdUSB = sys_cpu_to_le16(USB_SRN_2_0),			\
-		.bDeviceClass = USB_BCC_MISCELLANEOUS,			\
-		.bDeviceSubClass = 2,					\
-		.bDeviceProtocol = 1,					\
-		.bMaxPacketSize0 = 64,					\
-		.idVendor = vid,					\
-		.idProduct = pid,					\
-		.bcdDevice = sys_cpu_to_le16(USB_BCD_DRN),		\
-		.iManufacturer = SLIMEVR_USB_STRING_MANUFACTURER_IDX,	\
-		.iProduct = SLIMEVR_USB_STRING_PRODUCT_IDX,		\
-		.iSerialNumber = SLIMEVR_USB_STRING_SERIAL_NUMBER_IDX,	\
-		.bNumConfigurations = 0,				\
-	};								\
-	))								\
-	static STRUCT_SECTION_ITERABLE(usbd_context, device_name) = {	\
-		.name = STRINGIFY(device_name),				\
-		.dev = udc_dev,						\
-		.fs_desc = &fs_desc_##device_name,			\
-		IF_ENABLED(USBD_SUPPORTS_HIGH_SPEED, (			\
-		.hs_desc = &hs_desc_##device_name,			\
-		))							\
-	}
-
-SLIMEVR_USBD_DEVICE_DEFINE(slimevr_usbd, DEVICE_DT_GET(DT_NODELABEL(zephyr_udc0)),
-			   CONFIG_SLIMEVR_USB_DEVICE_VID, CONFIG_SLIMEVR_USB_DEVICE_PID);
-
-USBD_DESC_LANG_DEFINE(slimevr_lang);
-USBD_DESC_MANUFACTURER_DEFINE(slimevr_mfr, CONFIG_SLIMEVR_USB_DEVICE_MANUFACTURER);
-USBD_DESC_PRODUCT_DEFINE(slimevr_product, CONFIG_SLIMEVR_USB_DEVICE_PRODUCT);
-IF_ENABLED(CONFIG_HWINFO, (USBD_DESC_SERIAL_NUMBER_DEFINE(slimevr_sn)));
-
-USBD_DESC_CONFIG_DEFINE(slimevr_fs_cfg_desc, "FS Configuration");
-USBD_CONFIGURATION_DEFINE(slimevr_fs_config, 0, CONFIG_SLIMEVR_USB_DEVICE_MAX_POWER,
-			  &slimevr_fs_cfg_desc);
-
 static void report_event_handler(struct k_timer *dummy);
 static K_TIMER_DEFINE(event_timer, report_event_handler, NULL);
 
@@ -176,7 +112,6 @@ static const uint8_t hid_report_desc[] = {
 };
 
 uint16_t sent_device_addr = 0;
-bool usb_enabled = false;
 int64_t last_registration_sent = 0;
 
 //|type    |description
@@ -266,8 +201,8 @@ static uint16_t max_dropped_reports = 0;
 
 static void send_report(struct k_work *work)
 {
-	if (!usb_enabled) return;
-	if (!configured) return;  // Don't send reports until USB is configured
+	if (!receiver_usb_is_enabled()) return;
+	if (!receiver_usb_is_configured()) return;
 	if (!hid_ready) return;
 	if (!stored_trackers) return;
 
@@ -446,7 +381,7 @@ static void int_in_ready_cb(const struct device *dev)
 	}
 
 	if (!atomic_test_and_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG)) {
-		if (configured && hid_ready) {
+		if (receiver_usb_is_configured() && hid_ready) {
 			LOG_WRN("IN endpoint callback without preceding buffer write");
 		}
 	}
@@ -458,7 +393,8 @@ static void input_report_done_cb(const struct device *dev, const uint8_t *const 
 		return;
 	}
 
-	if (submitted_report != (const uint8_t *)ep_report_buffer && configured && hid_ready) {
+	if (submitted_report != (const uint8_t *)ep_report_buffer &&
+	    receiver_usb_is_configured() && hid_ready) {
 		LOG_WRN("IN endpoint callback for unexpected report buffer");
 	}
 
@@ -546,7 +482,7 @@ static void output_report_cb(const struct device *dev, const uint16_t len, const
 static void report_event_handler(struct k_timer *dummy)
 {
 	ARG_UNUSED(dummy);
-	if (usb_enabled) {
+	if (receiver_usb_is_enabled()) {
 		k_work_submit(&report_send);
 	}
 }
@@ -561,109 +497,11 @@ static const struct hid_device_ops ops = {
 	.output_report = output_report_cb,
 };
 
-static int usbd_add_string_descriptors(void)
+static void hid_usb_state_changed(bool configured)
 {
-	int ret;
-
-	ret = usbd_add_descriptor(&slimevr_usbd, &slimevr_lang);
-	if (ret != 0) {
-		return ret;
-	}
-
-	ret = usbd_add_descriptor(&slimevr_usbd, &slimevr_mfr);
-	if (ret != 0) {
-		return ret;
-	}
-
-	ret = usbd_add_descriptor(&slimevr_usbd, &slimevr_product);
-	if (ret != 0) {
-		return ret;
-	}
-
-	IF_ENABLED(CONFIG_HWINFO, (ret = usbd_add_descriptor(&slimevr_usbd, &slimevr_sn);))
-
-	return ret;
-}
-
-static int usbd_setup(usbd_msg_cb_t msg_cb)
-{
-	int ret;
-
-	ret = usbd_add_string_descriptors();
-	if (ret != 0) {
-		LOG_ERR("Failed to add USB string descriptors: %d", ret);
-		return ret;
-	}
-
-	ret = usbd_add_configuration(&slimevr_usbd, USBD_SPEED_FS, &slimevr_fs_config);
-	if (ret != 0) {
-		LOG_ERR("Failed to add USB FS configuration: %d", ret);
-		return ret;
-	}
-
-	ret = usbd_register_all_classes(&slimevr_usbd, USBD_SPEED_FS, 1, NULL);
-	if (ret != 0) {
-		LOG_ERR("Failed to register USB classes: %d", ret);
-		return ret;
-	}
-
-	if (IS_ENABLED(CONFIG_USBD_CDC_ACM_CLASS)) {
-		ret = usbd_device_set_code_triple(&slimevr_usbd, USBD_SPEED_FS,
-						  USB_BCC_MISCELLANEOUS, 0x02, 0x01);
-		if (ret != 0) {
-			LOG_ERR("Failed to set USB code triple: %d", ret);
-			return ret;
-		}
-	}
-
-	ret = usbd_msg_register_cb(&slimevr_usbd, msg_cb);
-	if (ret != 0) {
-		LOG_ERR("Failed to register USB message callback: %d", ret);
-		return ret;
-	}
-
-	ret = usbd_init(&slimevr_usbd);
-	if (ret != 0) {
-		LOG_ERR("Failed to initialize USB device: %d", ret);
-	}
-
-	return ret;
-}
-
-static void status_cb(struct usbd_context *const ctx, const struct usbd_msg *const msg)
-{
-	switch (msg->type) {
-	case USBD_MSG_RESET:
-		configured = false;
+	if (!configured) {
 		hid_ready = false;
 		atomic_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
-		break;
-	case USBD_MSG_CONFIGURATION:
-		configured = msg->status != 0;
-		if (!configured) {
-			hid_ready = false;
-			atomic_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
-		}
-		break;
-	case USBD_MSG_VBUS_READY:
-		if (usbd_enable(ctx) == 0) {
-			usb_enabled = true;
-		} else {
-			LOG_ERR("Failed to enable USB device");
-		}
-		break;
-	case USBD_MSG_VBUS_REMOVED:
-		configured = false;
-		hid_ready = false;
-		usb_enabled = false;
-		atomic_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
-		if (usbd_disable(ctx) != 0) {
-			LOG_ERR("Failed to disable USB device");
-		}
-		break;
-	default:
-		LOG_DBG("USBD message %s unhandled", usbd_msg_type_string(msg->type));
-		break;
 	}
 }
 
@@ -685,31 +523,12 @@ static int composite_pre_init(void)
 
 	k_work_init(&report_send, send_report);
 	k_timer_start(&event_timer, REPORT_PERIOD, REPORT_PERIOD);
+	receiver_usb_set_state_callback(hid_usb_state_changed);
 
 	return 0;
 }
 
 SYS_INIT(composite_pre_init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);
-
-void usb_init_thread(void)
-{
-	int ret = usbd_setup(status_cb);
-
-	if (ret != 0) {
-		return;
-	}
-
-	if (!usbd_can_detect_vbus(&slimevr_usbd)) {
-		ret = usbd_enable(&slimevr_usbd);
-		if (ret != 0) {
-			LOG_ERR("Failed to enable USB device: %d", ret);
-			return;
-		}
-		usb_enabled = true;
-	}
-}
-
-K_THREAD_DEFINE(usb_init_thread_id, 256, usb_init_thread, NULL, NULL, NULL, 6, 0, 500);
 
 //|type    |description
 //|RX     0|device info ("info")
