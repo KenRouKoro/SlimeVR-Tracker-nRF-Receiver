@@ -250,7 +250,7 @@ static void print_help(void)
 
 	printk(
 		"Button Functions:\n"
-		"  Short press (1x):          Status check\n"
+		"  Short press (1x):          Shutdown all paired trackers (LED double blink)\n"
 		"  Quick press (2x):          Exit pairing mode\n"
 		"  Quick press (3x):          Enter pairing mode\n"
 		"  Long press (5s):           Clear all pairings\n"
