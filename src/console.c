@@ -34,8 +34,6 @@
 #include <zephyr/logging/log_ctrl.h>
 #include "connection/esb.h"
 #include "connection/rssi_scan.h"
-#include "data_collect.h"
-#include "esb_ota.h"
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -237,12 +235,6 @@ static void print_help(void)
 
 	printk(
 		"Other:\n"
-		"  collect <id>               Start raw sensor data collection from tracker\n"
-		"  collect off                Stop data collection\n"
-		"  collect                    Show data collection status\n"
-		"  ota                        Show ESB OTA update status\n"
-		"  ota info <id>              Query firmware info from tracker\n"
-		"  ota abort                  Abort active OTA session\n"
 		"  meow                       Meow!\n"
 		"  help                       Show this help message\n"
 		"\n"
@@ -284,11 +276,6 @@ static void console_thread(void)
 		sys_reboot(SYS_REBOOT_COLD);
 #endif
 	}
-#endif
-
-	/* Data collection: HID mode uses SYS_INIT, CDC mode needs manual init */
-#if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
-	data_collect_init();
 #endif
 
 	console_getline_init();
@@ -342,8 +329,6 @@ static void console_thread(void)
 #endif
 
 	uint8_t command_meow[] = "meow";
-	uint8_t command_collect[] = "collect";
-	uint8_t command_ota[] = "ota";
 
 	while (1) {
 		uint8_t *line = console_getline();
@@ -1060,69 +1045,6 @@ static void console_thread(void)
 #endif
 		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) {
 			print_meow();
-		}
-		else if (memcmp(line, command_collect, sizeof(command_collect) - 1) == 0) {
-#ifdef CONFIG_DATA_COLLECT
-			if (arg && strcmp((char *)arg, "off") == 0) {
-				if (data_collect_is_active()) {
-					uint8_t tid = data_collect_get_target_id();
-					data_collect_stop();
-					esb_send_remote_command(tid, ESB_PONG_FLAG_DATA_COLLECT_OFF);
-					printk("Data collection stopped, sent OFF to tracker %u\n", tid);
-				} else {
-					printk("Data collection is not active\n");
-				}
-			} else if (arg) {
-				char *endptr = NULL;
-				unsigned long id = strtoul((char *)arg, &endptr, 10);
-				if (endptr != (char *)arg && id < 255) {
-					data_collect_start((uint8_t)id);
-					esb_send_remote_command((uint8_t)id, ESB_PONG_FLAG_DATA_COLLECT_ON);
-					printk("Data collection started for tracker %u\n", (unsigned)id);
-					printk("Test mode enabled on tracker (prevents sleep)\n");
-					printk("Non-target trackers will receive SHUTDOWN\n");
-					printk("Use 'collect off' to stop\n");
-				} else {
-					printk("Invalid tracker ID: %s\n", arg);
-				}
-			} else {
-				if (data_collect_is_active()) {
-					printk("Data collection ACTIVE for tracker %u\n",
-						data_collect_get_target_id());
-				} else {
-					printk("Data collection inactive\n");
-					printk("Usage: collect <tracker_id> | collect off\n");
-				}
-			}
-#else
-			printk("Data collection not available (build with CONFIG_DATA_COLLECT=y)\n");
-#endif
-		}
-		else if (memcmp(line, command_ota, sizeof(command_ota) - 1) == 0) {
-			if (!arg) {
-				/* "ota" with no args → show status */
-				esb_ota_relay_console_cmd(0, "status");
-			} else if (strcmp((char *)arg, "abort") == 0 ||
-				   strcmp((char *)arg, "cancel") == 0) {
-				if (arg2) {
-					int id = atoi((char *)arg2);
-					esb_ota_relay_console_cmd((uint8_t)id, "abort");
-				} else {
-					/* Abort all OTA targets */
-					esb_ota_relay_console_cmd(0xFF, "abort");
-				}
-			} else if (strcmp((char *)arg, "status") == 0) {
-				esb_ota_relay_console_cmd(0, "status");
-			} else if (strcmp((char *)arg, "info") == 0) {
-				if (arg2) {
-					int id = atoi((char *)arg2);
-					esb_ota_relay_console_cmd((uint8_t)id, "info");
-				} else {
-					printk("Usage: ota info <tracker_id>\n");
-				}
-			} else {
-				printk("OTA commands: ota, ota info <id>, ota abort, ota status\n");
-			}
 		}
 		else {
 			printk("Unknown command\n");

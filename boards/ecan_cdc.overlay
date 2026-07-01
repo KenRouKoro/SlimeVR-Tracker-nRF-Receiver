@@ -1,7 +1,7 @@
 &zephyr_udc0 {
 	cdc_acm_uart1: cdc_acm_uart1 {
 		compatible = "zephyr,cdc-acm-uart";
-		label = "SlimeNRF Raw Data CDC";
+		label = "ECAN-ECBT-16B";
 		tx-fifo-size = <4096>;
 		rx-fifo-size = <64>;
 	};

@@ -28,11 +28,9 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/crc.h>
 
+#include "ecan.h"
 #include "globals.h"
-#include "hid.h"
 #include "system/system.h"
-#include "data_collect.h"
-#include "esb_ota.h"
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
@@ -796,127 +794,6 @@ static void esb_stats_thread(void)
 }
 
 /* ---------------------------------------------------------------------------
- * Raw data ARQ — sequence tracking and retransmit requests via ACK payload.
- *
- * All state is volatile for ISR access.  Only the target tracker is tracked.
- * Gap queue holds up to RAW_ARQ_MAX_GAPS missing sequence numbers.
- * Each ACK payload carries up to RAW_ARQ_MAX_GAPS retransmit requests.
- *
- * ACK payload format for raw data (type 0x10):
- *   [0]    = 0xAA  (marker byte)
- *   [1]    = count  (0 = all OK, 1..4 = number of seqs to retransmit)
- *   [2..3] = missing_seq_0 (BE16)
- *   [4..5] = missing_seq_1 (BE16)  (if count >= 2)
- *   ...
- * -------------------------------------------------------------------------*/
-#define RAW_ARQ_MAX_GAPS 8
-#define RAW_ARQ_MARKER   0xAA
-/* Maximum sequence distance before a gap is considered stale and unrecoverable.
- * Keep below the tracker's 256-packet raw ring so requests never target
- * overwritten slots after ACK/processing latency. */
-#define RAW_ARQ_STALE_DISTANCE 200
-
-static volatile uint16_t raw_arq_expected_seq;
-static volatile bool     raw_arq_seq_initialized;
-static volatile uint16_t raw_arq_gap_queue[RAW_ARQ_MAX_GAPS];
-static volatile uint8_t  raw_arq_gap_count;
-/* Counters for diagnostics (read by event_handler, not ISR-critical) */
-static volatile uint32_t raw_arq_gaps_detected;
-static volatile uint32_t raw_arq_retransmits_received;
-
-/* Called from esb_ack_handler_cb (ISR context) when raw data packet arrives.
- * Updates gap queue and builds ACK payload with retransmit requests. */
-static void raw_arq_process_isr(uint16_t received_seq,
-				struct esb_payload *ack_payload,
-				bool *has_ack_payload)
-{
-	if (!raw_arq_seq_initialized) {
-		raw_arq_expected_seq = received_seq + 1;
-		raw_arq_seq_initialized = true;
-		*has_ack_payload = false;
-		return;
-	}
-
-	uint16_t expected = raw_arq_expected_seq;
-	int16_t diff = (int16_t)(received_seq - expected);
-
-	if (diff == 0) {
-		/* In order — advance expected */
-		raw_arq_expected_seq = received_seq + 1;
-	} else if (diff > 0 && diff <= 100) {
-		/* Forward gap: diff packets missing */
-		uint8_t remaining = RAW_ARQ_MAX_GAPS - raw_arq_gap_count;
-		uint16_t to_add = (uint16_t)diff;
-		if (to_add > remaining) to_add = remaining;
-		for (uint16_t i = 0; i < to_add; i++) {
-			raw_arq_gap_queue[raw_arq_gap_count++] =
-				(uint16_t)(expected + i);
-		}
-		raw_arq_gaps_detected += (uint32_t)diff;
-		raw_arq_expected_seq = received_seq + 1;
-	} else if (diff < 0 && diff > -100) {
-		/* Retransmitted (out-of-order) packet: remove from gap queue */
-		for (uint8_t i = 0; i < raw_arq_gap_count; i++) {
-			if (raw_arq_gap_queue[i] == received_seq) {
-				/* Shift remaining entries */
-				for (uint8_t j = i; j + 1 < raw_arq_gap_count; j++) {
-					raw_arq_gap_queue[j] = raw_arq_gap_queue[j + 1];
-				}
-				raw_arq_gap_count--;
-				raw_arq_retransmits_received++;
-				break;
-			}
-		}
-		/* Don't advance expected_seq for retransmits */
-	} else {
-		/* Large jump — treat as reset/restart */
-		raw_arq_expected_seq = received_seq + 1;
-		raw_arq_gap_count = 0;
-	}
-
-	/* Evict stale gap entries that are too far behind expected_seq.
-	 * These sequences have been overwritten in the tracker's ring buffer
-	 * and can never be retransmitted. Without eviction, stale entries
-	 * permanently occupy queue slots, blocking new gap tracking. */
-	{
-		uint16_t cur_expected = raw_arq_expected_seq;
-		uint8_t write_idx = 0;
-		for (uint8_t i = 0; i < raw_arq_gap_count; i++) {
-			uint16_t age = (uint16_t)(cur_expected - raw_arq_gap_queue[i]);
-			if (age < RAW_ARQ_STALE_DISTANCE) {
-				raw_arq_gap_queue[write_idx++] = raw_arq_gap_queue[i];
-			}
-		}
-		raw_arq_gap_count = write_idx;
-	}
-
-	/* Build ACK payload with pending retransmit requests */
-	if (raw_arq_gap_count > 0) {
-		uint8_t n = raw_arq_gap_count;
-		ack_payload->pipe = 0; /* will be overridden by caller */
-		ack_payload->length = 2 + n * 2;
-		ack_payload->noack = false;
-		ack_payload->data[0] = RAW_ARQ_MARKER;
-		ack_payload->data[1] = n;
-		for (uint8_t i = 0; i < n; i++) {
-			sys_put_be16(raw_arq_gap_queue[i],
-				     &ack_payload->data[2 + i * 2]);
-		}
-		*has_ack_payload = true;
-	} else {
-		*has_ack_payload = false;
-	}
-}
-
-static void raw_arq_reset(void)
-{
-	raw_arq_seq_initialized = false;
-	raw_arq_gap_count = 0;
-	raw_arq_gaps_detected = 0;
-	raw_arq_retransmits_received = 0;
-}
-
-/* ---------------------------------------------------------------------------
  * ACK handler — runs in radio ISR context (~130 µs budget).
  * Builds the ACK payload for the *current* packet so the response is
  * returned in the same transaction rather than the next one.
@@ -1023,21 +900,6 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 		uint8_t counter = pdu_data[2];
 		uint8_t cmd = tracker_remote_command[tracker_id];
 
-		/* In data collection mode, force SHUTDOWN for non-target trackers */
-		if (data_collect_is_active() &&
-		    !data_collect_is_target(tracker_id)) {
-			cmd = ESB_PONG_FLAG_SHUTDOWN;
-		}
-
-		/* During active OTA, keep non-participating trackers suppressed.
-		 * This handles trackers that reboot mid-session (e.g. after a
-		 * previous batch completes) and reconnect without suppress. */
-		if (cmd == ESB_PONG_FLAG_NORMAL &&
-		    esb_ota_relay_is_active() &&
-		    !esb_ota_relay_is_target(tracker_id)) {
-			cmd = ESB_PONG_FLAG_OTA_SUPPRESS;
-		}
-
 		ack_payload->pipe = 1 + (tracker_id % 7);
 		ack_payload->length = ESB_PONG_LEN;
 		ack_payload->noack = false;
@@ -1099,47 +961,10 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 		ack_payload->data[ESB_PONG_LEN - 1] =
 			crc8_ccitt(0x07, ack_payload->data, ESB_PONG_LEN - 1);
 		*has_ack_payload = true;
-
-		/* If OTA session has a pending command for this tracker
-		 * (e.g., BEGIN before tracker enters OTA mode), override
-		 * the standard PONG with the OTA payload. */
-		if (esb_ota_relay_is_active() &&
-		    esb_ota_relay_is_target(tracker_id)) {
-			bool ota_has_ack = false;
-			esb_ota_relay_fill_ack(tracker_id, pipe_id,
-					       ack_payload, &ota_has_ack,
-					       NULL, 0);
-			if (ota_has_ack) {
-				*has_ack_payload = true;
-			}
-		}
 		return;
 	}
 
 	/* Other packet types: no ACK payload, handled by event_handler */
-
-	/* ---- OTA status/poll packets from tracker in OTA mode ---- */
-	if (data_length >= 2 && pdu_data[0] == ESB_OTA_STATUS_TYPE) {
-		uint8_t tracker_id = pdu_data[1];
-		esb_ota_relay_fill_ack(tracker_id, pipe_id,
-				       ack_payload, has_ack_payload,
-				       pdu_data, data_length);
-		return;
-	}
-
-	/* ---- Raw data ARQ (type 0x10/0x13, data collection active) ---- */
-	if (data_length >= 4 &&
-	    (pdu_data[0] == ESB_RAW_IMU_TYPE || pdu_data[0] == ESB_RAW_IMU_QUAT_TYPE)) {
-		uint8_t tracker_id = pdu_data[1];
-		if (data_collect_is_active() &&
-		    data_collect_is_target(tracker_id)) {
-			uint16_t seq = sys_get_be16(&pdu_data[2]);
-			raw_arq_process_isr(seq, ack_payload, has_ack_payload);
-			if (*has_ack_payload) {
-				ack_payload->pipe = pipe_id;
-			}
-		}
-	}
 }
 
 void event_handler(struct esb_evt const *event)
@@ -1641,17 +1466,9 @@ void event_handler(struct esb_evt const *event)
 						}
 					}
 
-					/* PONG is now built by ack_handler in radio ISR context.
-					 * event_handler only needs to track sequence state. */
-					last_pong_queued_counter[tracker_id] = counter;
-				} else {
-					/* Not a PING packet — check for OTA STATUS (same length) */
-					uint8_t pkt_type = rx_payload.data[0];
-					if (pkt_type == ESB_OTA_STATUS_TYPE ||
-					    pkt_type == ESB_OTA_FW_INFO_TYPE) {
-						esb_ota_relay_process_tracker_packet(
-							rx_payload.data, rx_payload.length);
-					}
+				/* PONG is now built by ack_handler in radio ISR context.
+				 * event_handler only needs to track sequence state. */
+				last_pong_queued_counter[tracker_id] = counter;
 				}
 			} break;
 			case 17: // 16 bytes data + 1 byte sequence number
@@ -1699,63 +1516,11 @@ void event_handler(struct esb_evt const *event)
 					stats->status_received = 0;
 					stats->status_lost = 0;
 				}
-				hid_write_packet_n(rx_payload.data,
-								   rx_payload.rssi); // write to hid endpoint
+				ecan_handle_packet(rx_payload.data,
+								   rx_payload.rssi); // emit ECAN-ECBT-16B frame
 			} break;
 			default:
 			{
-				/* OTA packets from tracker (status, firmware info) */
-				uint8_t pkt_type = rx_payload.data[0];
-				if (pkt_type == ESB_OTA_STATUS_TYPE ||
-				    pkt_type == ESB_OTA_FW_INFO_TYPE) {
-					esb_ota_relay_process_tracker_packet(
-						rx_payload.data, rx_payload.length);
-					break;
-				}
-
-				/* Raw data collection packets (types 0x10-0x13): variable length.
-				 * Forward raw payload to CDC for PC-side data collection.
-				 * Duplicate raw IMU packets (same tracker+sequence) are
-				 * dropped since trackers send each sample twice for
-				 * redundancy in noack mode. */
-				if (pkt_type == ESB_RAW_IMU_TYPE ||
-				    pkt_type == ESB_RAW_IMU_QUAT_TYPE ||
-				    pkt_type == ESB_RAW_MAG_TYPE ||
-				    pkt_type == ESB_RAW_META_TYPE ||
-				    pkt_type == ESB_RAW_CAL_TYPE) {
-					uint8_t tracker_id = rx_payload.data[1];
-					if (tracker_id < stored_trackers &&
-					    data_collect_is_target(tracker_id)) {
-						/* Dedup raw IMU by tracker_id + sequence */
-						if (pkt_type == ESB_RAW_IMU_TYPE ||
-						    pkt_type == ESB_RAW_IMU_QUAT_TYPE) {
-							static uint8_t last_raw_tracker = 0xFF;
-							static uint16_t last_raw_seq = 0xFFFF;
-							uint16_t seq = sys_get_be16(&rx_payload.data[2]);
-							if (tracker_id == last_raw_tracker && seq == last_raw_seq) {
-								break; /* duplicate */
-							}
-							last_raw_tracker = tracker_id;
-							last_raw_seq = seq;
-						}
-						data_collect_write(rx_payload.data,
-								   rx_payload.length,
-								   rx_payload.rssi);
-					} else if (tracker_id < stored_trackers &&
-						   !data_collect_is_active()) {
-						/* Tracker is still sending raw data but
-						 * receiver is not in collection mode (e.g.
-						 * receiver was unplugged and re-plugged).
-						 * Tell the tracker to stop collecting. */
-						if (tracker_remote_command[tracker_id] !=
-						    ESB_PONG_FLAG_DATA_COLLECT_OFF) {
-							esb_send_remote_command(
-								tracker_id,
-								ESB_PONG_FLAG_DATA_COLLECT_OFF);
-						}
-					}
-					break;
-				}
 handle_composite_packet:
 				/* Composite packet (type ESB_COMPOSITE_TYPE): variable length.
 				 * Format: [ESB_COMPOSITE_TYPE][tracker_id][sub_count][sub_type0][sub_data0...]...[sequence]
@@ -1790,51 +1555,62 @@ handle_composite_packet:
 					break; /* out-of-order */
 				}
 
-				/* Parse sub-packets and reconstruct standard 16-byte packets */
-				int pos = 3; /* skip header: type, id, sub_count */
+				/* Parse sub-packets and reconstruct standard 16-byte packets.
+				 * Two passes: cache info (sub-type 0/2) before emitting quat
+				 * (sub-type 1/4) so battery/temperature are current when the
+				 * quat frame is built — handles composites where the info
+				 * sub-packet follows the quat sub-packet in the bundle. */
 				int end = rx_payload.length - 1; /* exclude sequence byte */
 
-				for (int i = 0; i < sub_count && pos < end; i++) {
-					uint8_t sub_type = rx_payload.data[pos++];
-					int sub_len;
+				for (int pass = 0; pass < 2; pass++) {
+					int pos = 3; /* skip header: type, id, sub_count */
+					for (int i = 0; i < sub_count && pos < end; i++) {
+						uint8_t sub_type = rx_payload.data[pos++];
+						int sub_len;
 
-					/* Determine sub-packet data length */
-					switch (sub_type) {
-					case 0: sub_len = 13; break; /* info */
-					case 1: sub_len = 14; break; /* quat+accel */
-					case 2: sub_len = 13; break; /* compact quat */
-					case 3: sub_len = 2; break;  /* status */
-					case 4: sub_len = 14; break; /* quat+mag */
-					case 5: sub_len = 8; break;  /* runtime */
-					default:
-						LOG_ERR("Unknown composite sub-type: %d", sub_type);
-						sub_len = -1;
-						break;
+						/* Determine sub-packet data length */
+						switch (sub_type) {
+						case 0: sub_len = 13; break; /* info */
+						case 1: sub_len = 14; break; /* quat+accel */
+						case 2: sub_len = 13; break; /* compact quat */
+						case 3: sub_len = 2; break;  /* status */
+						case 4: sub_len = 14; break; /* quat+mag */
+						case 5: sub_len = 8; break;  /* runtime */
+						default:
+							LOG_ERR("Unknown composite sub-type: %d", sub_type);
+							sub_len = -1;
+							break;
+						}
+
+						if (sub_len < 0 || pos + sub_len > end) {
+							break;
+						}
+
+						/* Pass 0: info sub-types (0/2) update the cache.
+						 * Pass 1: quat/status/runtime sub-types emit or no-op. */
+						bool is_info = (sub_type == 0 || sub_type == 2);
+						if ((pass == 0) == is_info) {
+							/* Reconstruct a standard 16-byte packet */
+							uint8_t pkt[16] = {0};
+							pkt[0] = sub_type;
+							pkt[1] = tracker_id;
+							memcpy(&pkt[2], &rx_payload.data[pos], MIN(sub_len, 14));
+
+							/* For status packets (type 3), fill packet loss stats */
+							if (sub_type == 3) {
+								struct packet_stats *stats = &tracker_stats[tracker_id];
+								pkt[4] = stats->status_received;
+								pkt[5] = stats->status_lost;
+								pkt[6] = 0;
+								pkt[7] = 0;
+								stats->status_received = 0;
+								stats->status_lost = 0;
+							}
+
+							ecan_handle_packet(pkt, rx_payload.rssi);
+						}
+						pos += sub_len;
 					}
-
-					if (sub_len < 0 || pos + sub_len > end) {
-						break;
-					}
-
-					/* Reconstruct a standard 16-byte packet */
-					uint8_t pkt[16] = {0};
-					pkt[0] = sub_type;
-					pkt[1] = tracker_id;
-					memcpy(&pkt[2], &rx_payload.data[pos], MIN(sub_len, 14));
-
-					/* For status packets (type 3), fill packet loss stats */
-					if (sub_type == 3) {
-						struct packet_stats *stats = &tracker_stats[tracker_id];
-						pkt[4] = stats->status_received;
-						pkt[5] = stats->status_lost;
-						pkt[6] = 0;
-						pkt[7] = 0;
-						stats->status_received = 0;
-						stats->status_lost = 0;
-					}
-
-					hid_write_packet_n(pkt, rx_payload.rssi);
-					pos += sub_len;
 				}
 			} break;
 			}
@@ -2275,7 +2051,7 @@ void esb_clear(void)
 	}
 	LOG_INF("Packet sequence state and statistics reset for all trackers");
 
-	hid_reset_all_rssi_smooth();
+	ecan_reset_all();
 	esb_clearing = false;
 }
 
@@ -2291,8 +2067,8 @@ void esb_reset_tracker_sequence(uint8_t tracker_id)
 		last_pong_queued_counter[tracker_id] = 0;
 		// Reset statistics
 		memset(&tracker_stats[tracker_id], 0, sizeof(struct packet_stats));
-		// Reset RSSI smoothing state
-		hid_reset_rssi_smooth(tracker_id);
+		// Reset ECAN per-tracker cache
+		ecan_reset_tracker(tracker_id);
 		LOG_INF("Packet sequence state and statistics reset for tracker %d", tracker_id);
 	}
 }
@@ -2388,11 +2164,6 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 {
 	if (tracker_id < MAX_TRACKERS) {
 		tracker_remote_command[tracker_id] = command_flag;
-
-		/* Reset ARQ state when data collection starts */
-		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON) {
-			raw_arq_reset();
-		}
 
 		const char *cmd_name = "UNKNOWN";
 		switch (command_flag) {
@@ -2497,24 +2268,6 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 			break;
 		case ESB_PONG_FLAG_TEST_MODE_OFF:
 			cmd_name = "TEST_MODE_OFF";
-			break;
-		case ESB_PONG_FLAG_DATA_COLLECT_ON:
-			cmd_name = "DATA_COLLECT_ON";
-			break;
-		case ESB_PONG_FLAG_DATA_COLLECT_OFF:
-			cmd_name = "DATA_COLLECT_OFF";
-			break;
-		case ESB_PONG_FLAG_OTA_QUERY_INFO:
-			cmd_name = "OTA_QUERY_INFO";
-			break;
-		case ESB_PONG_FLAG_OTA_ABORT:
-			cmd_name = "OTA_ABORT";
-			break;
-		case ESB_PONG_FLAG_OTA_SUPPRESS:
-			cmd_name = "OTA_SUPPRESS";
-			break;
-		case ESB_PONG_FLAG_OTA_UNSUPPRESS:
-			cmd_name = "OTA_UNSUPPRESS";
 			break;
 		}
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", cmd_name, command_flag, tracker_id);
