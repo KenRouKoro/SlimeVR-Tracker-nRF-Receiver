@@ -1909,6 +1909,36 @@ void esb_pop_pair(void)
 	}
 }
 
+int esb_swap_pair(uint8_t id_a, uint8_t id_b)
+{
+	if (id_a == id_b) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	if (id_a >= stored_trackers || id_b >= stored_trackers) {
+		k_mutex_unlock(&tracker_store_lock);
+		LOG_WRN("Cannot swap ids %u and %u, only %u devices stored", id_a, id_b, stored_trackers);
+		return -ENOENT;
+	}
+
+	uint64_t tmp = stored_tracker_addr[id_a];
+	stored_tracker_addr[id_a] = stored_tracker_addr[id_b];
+	stored_tracker_addr[id_b] = tmp;
+	__asm__ volatile("" ::: "memory"); // compiler barrier
+	k_mutex_unlock(&tracker_store_lock);
+
+	nvs_write_async(STORED_ADDR_0 + id_a, &stored_tracker_addr[id_a], sizeof(stored_tracker_addr[0]));
+	nvs_write_async(STORED_ADDR_0 + id_b, &stored_tracker_addr[id_b], sizeof(stored_tracker_addr[0]));
+
+	esb_reset_tracker_sequence(id_a);
+	esb_reset_tracker_sequence(id_b);
+
+	LOG_INF("Swapped ids %u and %u (%012llX <-> %012llX)", id_a, id_b, stored_tracker_addr[id_a],
+		stored_tracker_addr[id_b]);
+	return 0;
+}
+
 static bool esb_parse_pair(const uint8_t packet[8])
 {
 	uint64_t raw_addr = 0;

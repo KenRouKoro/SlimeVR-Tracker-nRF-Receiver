@@ -162,6 +162,7 @@ static void print_help(void)
 		"  reboot                     Soft reset the device\n"
 		"  add <address>              Manually add a device\n"
 		"  remove                     Remove last device\n"
+		"  swap <id_a> <id_b>         Swap tracker ids of two paired devices\n"
 		"  pair [count]               Enter pairing mode\n"
 		"    pair                     Pair indefinitely (timeout after %d seconds)\n"
 		"    pair 4                   Exit after pairing 4 new devices\n"
@@ -313,6 +314,7 @@ static void console_thread(void)
 	uint8_t command_reboot[] = "reboot";
 	uint8_t command_add[] = "add";
 	uint8_t command_remove[] = "remove";
+	uint8_t command_swap[] = "swap";
 	uint8_t command_pair[] = "pair";
 	uint8_t command_exit[] = "exit";
 	uint8_t command_clear[] = "clear";
@@ -428,6 +430,31 @@ static void console_thread(void)
 			}
 		} else if (memcmp(line, command_remove, sizeof(command_remove)) == 0) {
 			esb_pop_pair();
+		} else if (memcmp(line, command_swap, sizeof(command_swap)) == 0) {
+			if (!arg || !arg2) {
+				printk("Usage: swap <id_a> <id_b>\n");
+			} else {
+				char *endptr;
+				long id_a = strtol(arg, &endptr, 10);
+				if (*endptr != '\0' || id_a < 0 || id_a >= MAX_TRACKERS) {
+					printk("Invalid id_a. Usage: swap <id_a> <id_b>\n");
+				} else {
+					long id_b = strtol(arg2, &endptr, 10);
+					if (*endptr != '\0' || id_b < 0 || id_b >= MAX_TRACKERS) {
+						printk("Invalid id_b. Usage: swap <id_a> <id_b>\n");
+					} else {
+						int ret = esb_swap_pair((uint8_t)id_a, (uint8_t)id_b);
+						if (ret == 0) {
+							printk("Swapped ids %ld and %ld\n", id_a, id_b);
+							printk("Note: trackers keep their stored id; re-pair them to adopt the new ids\n");
+						} else if (ret == -ENOENT) {
+							printk("Id out of range, only %u devices paired\n", stored_trackers);
+						} else {
+							printk("Failed to swap: %d\n", ret);
+						}
+					}
+				}
+			}
 		} else if (memcmp(line, command_list, sizeof(command_list)) == 0) {
 			print_list();
 		} else if (memcmp(line, command_reboot, sizeof(command_reboot)) == 0) {
