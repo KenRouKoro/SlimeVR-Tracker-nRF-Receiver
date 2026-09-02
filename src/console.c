@@ -28,7 +28,6 @@
 #define USB DT_NODELABEL(usbd)
 #if DT_NODE_HAS_STATUS(USB, okay)
 
-#include <zephyr/drivers/uart.h>
 #include <zephyr/console/console.h>
 #include <zephyr/logging/log_ctrl.h>
 #include "connection/esb.h"
@@ -45,10 +44,12 @@
 LOG_MODULE_REGISTER(console, LOG_LEVEL_INF);
 
 static void console_thread(void);
-/* below ESB_THREAD_PRIORITY; console must not preempt radio housekeeping */
-K_THREAD_DEFINE(console_thread_id, 1024, console_thread, NULL, NULL, NULL, CONSOLE_THREAD_PRIORITY, 0, 0);
+static struct k_thread console_thread_id;
+static K_THREAD_STACK_DEFINE(console_thread_stack, 1024);
+static bool console_thread_running;
+static bool console_thread_initialized;
 
-#define DFU_EXISTS (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER)
+#define DFU_EXISTS (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER || CONFIG_BOOTLOADER_MCUBOOT)
 
 static const char *meows[] = {
 	"Mew", "Meww", "Meow", "Meow meow", "Mrrrp", "Mrrf", "Mreow", "Mrrrow", "Mrrr", "Purr",
@@ -100,6 +101,7 @@ static void print_help(void)
 
 	printk(
 		"Statistics:\n"
+		"  health                     Print one non-resetting receiver health snapshot\n"
 		"  stats                      Toggle detailed packet statistics\n"
 		"  stats <seconds>            Show detailed stats for N seconds\n"
 		"  resetstats                 Reset packet statistics\n"
@@ -108,7 +110,7 @@ static void print_help(void)
 
 	printk(
 		"RF Channel (Local Receiver):\n"
-		"  channel <1-100>            Set receiver RF channel only\n"
+		"  channel <0-100>            Set receiver RF channel only\n"
 		"    Example: channel 25       Set receiver to channel 25\n"
 		"  clearchannel               Clear receiver RF channel (use default)\n"
 		"\n"
@@ -116,7 +118,7 @@ static void print_help(void)
 
 	printk(
 		"RSSI / Channel Scan:\n"
-		"  rssi_scan                  Scan RSSI across channels 1-100 and print a recommended channel\n"
+		"  rssi_scan                  Scan RSSI across preferred channels and print a recommendation\n"
 		"\n"
 	);
 
@@ -125,7 +127,7 @@ static void print_help(void)
 		"  send <id|all> <command>    Send remote command to tracker(s)\n"
 		"    Commands: shutdown, calibrate, 6-side, meow, scan,\n"
 		"              mag <on|off|clear|cal|auto on|auto off>, reboot, clear, dfu [ota],\n"
-		"              channel <1-100>, clearchannel,\n"
+		"              channel <0-100>, clearchannel,\n"
 		"              sens <x,y,z|reset|auto <x|y|z> [rev]>,\n"
 		"              reset <zro|acc|bat|mag|tcal|fusion>, ping\n"
 	);
@@ -155,7 +157,7 @@ static void print_help(void)
 #if DFU_EXISTS
 	printk(
 		"Bootloader:\n"
-		"  dfu [ota]                  Enter DFU bootloader (default UF2, optional OTA)\n"
+		"  dfu [ota]                  Enter the configured DFU bootloader\n"
 		"\n"
 	);
 #endif
@@ -207,42 +209,37 @@ static bool parse_u8_arg(const char *str, uint8_t *value)
 	return true;
 }
 
+void console_serial_start(void)
+{
+	if (!console_thread_initialized) {
+		console_thread_initialized = true;
+		console_getline_init();
+#if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
+		data_collect_init();
+#endif
+	}
+	if (console_thread_running) {
+		return;
+	}
+	console_thread_running = true;
+	k_thread_create(&console_thread_id, console_thread_stack,
+			K_THREAD_STACK_SIZEOF(console_thread_stack),
+			(k_thread_entry_t)console_thread, NULL, NULL, NULL,
+			CONSOLE_THREAD_PRIORITY, 0, K_NO_WAIT);
+}
+
+void console_serial_stop(void)
+{
+	if (!console_thread_running) {
+		return;
+	}
+	k_thread_abort(&console_thread_id);
+	console_thread_running = false;
+}
+
 static void console_thread(void)
 {
-#if DFU_EXISTS
-	if (button_read()) { // button held on usb connect, enter DFU
-		sys_enter_dfu(false);
-	}
-#endif
-
-	/* Data collection: HID mode uses SYS_INIT, CDC mode needs manual init */
-#if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
-	data_collect_init();
-#endif
-
-	console_getline_init();
-
-	// Wait for any pending log data to be processed
-	while (log_data_pending()) {
-		k_usleep(1);
-	}
-
-	// Wait for USB CDC to be ready by checking DTR (Data Terminal Ready) signal
-	// This ensures the terminal is actually connected and ready to receive data
-	const struct device *uart_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
-	if (device_is_ready(uart_dev)) {
-		uint32_t dtr = 0;
-		// Wait up to 5 seconds for DTR to be asserted (terminal connected)
-		for (int i = 0; i < 50; i++) {
-			if (uart_line_ctrl_get(uart_dev, UART_LINE_CTRL_DTR, &dtr) == 0 && dtr) {
-				break;
-			}
-			k_msleep(100);
-		}
-		// Give a bit more time for the terminal to be fully ready
-		k_msleep(100);
-	}
-
+	// Created only while the host asserts DTR; USB lifecycle lives in usb.c.
 	printk("*** " CONFIG_SLIMEVR_USB_DEVICE_MANUFACTURER " " CONFIG_SLIMEVR_USB_DEVICE_PRODUCT " ***\n");
 	printk(FW_STRING);
 	printk("Repo: %s | Branch: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH);
@@ -259,6 +256,7 @@ static void console_thread(void)
 	const char command_exit[] = "exit";
 	const char command_clear[] = "clear";
 	const char command_stats[] = "stats";
+	const char command_health[] = "health";
 	const char command_resetstats[] = "resetstats";
 	const char command_channel[] = "channel";
 	const char command_clearchannel[] = "clearchannel";
@@ -351,6 +349,12 @@ static void console_thread(void)
 			rcv_cmd_exit_pair();
 		} else if (strcmp(argv[0], command_clear) == 0) {
 			rcv_cmd_clear();
+		} else if (strcmp(argv[0], command_health) == 0) {
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+			esb_print_health_snapshot();
+#else
+			printk("health requires CONFIG_TDMA_DIAGNOSTICS=y\n");
+#endif
 		} else if (strcmp(argv[0], command_stats) == 0) {
 			if (!arg) {
 				rcv_cmd_stats(0);
@@ -390,14 +394,14 @@ static void console_thread(void)
 			}
 		} else if (strcmp(argv[0], command_channel) == 0) {
 			if (!arg) {
-				printk("Usage: channel <1-100>\n");
+				printk("Usage: channel <0-100>\n");
 				printk("Example: channel 25 - Set receiver RF channel to 25 (local only)\n");
 			} else {
 				char *endptr;
 				long channel = strtol(arg, &endptr, 10);
 
-				if (*endptr != '\0' || channel < 1 || channel > 100) {
-					printk("Invalid channel. Must be a number between 1 and 100.\n");
+				if (*endptr != '\0' || channel < 0 || channel > 100) {
+					printk("Invalid channel. Must be a number between 0 and 100.\n");
 				} else if (rcv_cmd_channel_set((uint8_t)channel) == RCV_HID_ST_OK) {
 					printk("Receiver RF channel set to %d (local only)\n", (int)channel);
 				}
