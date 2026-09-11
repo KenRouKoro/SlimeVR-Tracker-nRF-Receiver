@@ -16,13 +16,13 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/flash.h>
+#include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/logging/log.h>
 #if defined(CONFIG_BOOTLOADER_MCUBOOT) && DT_NODE_EXISTS(DT_NODELABEL(slot1_partition))
 #include <zephyr/dfu/mcuboot.h>
-#include <zephyr/storage/flash_map.h>
 #define RCV_OTA_USE_MCUBOOT 1
 #else
 #define RCV_OTA_USE_MCUBOOT 0
@@ -34,17 +34,13 @@ LOG_MODULE_REGISTER(receiver_ota, LOG_LEVEL_INF);
 
 /* ── Flash configuration ─────────────────────────────────────────── */
 
-#ifndef CONFIG_FLASH_LOAD_OFFSET
-#define CONFIG_FLASH_LOAD_OFFSET 0x1000
-#endif
-
 /* MBR occupies 0x0-0x1000 and must not be overwritten via OTA */
-#define RCV_OTA_FLASH_BASE      MAX(CONFIG_FLASH_LOAD_OFFSET, 0x1000)
+#define RCV_OTA_FLASH_BASE      MAX(PARTITION_NODE_OFFSET(DT_CHOSEN(zephyr_code_partition)), 0x1000)
 #define RCV_OTA_FLASH_PAGE_SIZE  4096
 
 /*
  * App partition end address (before NVS storage).
- * These match the fixed-partition layouts.
+ * These preserve the existing partition layout limits.
  */
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
 #define RCV_OTA_FLASH_END        0
@@ -417,11 +413,11 @@ static void rcv_ota_handle_begin(const uint8_t *data, size_t len)
 		return;
 	}
 	const struct flash_area *secondary;
-	int area_err = flash_area_open(FIXED_PARTITION_ID(slot1_partition), &secondary);
+	int area_err = flash_area_open(PARTITION_ID(slot1_partition), &secondary);
 	size_t image_offset = area_err ? 0 :
-		boot_get_image_start_offset(FIXED_PARTITION_ID(slot1_partition));
+		boot_get_image_start_offset(PARTITION_ID(slot1_partition));
 	ssize_t trailer_offset = area_err ? area_err :
-		boot_get_area_trailer_status_offset(FIXED_PARTITION_ID(slot1_partition));
+		boot_get_area_trailer_status_offset(PARTITION_ID(slot1_partition));
 	uint32_t mcuboot_capacity = trailer_offset < 0 || (size_t)trailer_offset <= image_offset ?
 		0 : (uint32_t)trailer_offset - image_offset;
 	if (area_err || trailer_offset < 0 || (size_t)trailer_offset <= image_offset ||
