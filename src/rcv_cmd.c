@@ -146,6 +146,16 @@ uint8_t rcv_cmd_remove(void)
 	return RCV_HID_ST_OK;
 }
 
+uint8_t rcv_cmd_swap(uint8_t id_a, uint8_t id_b)
+{
+	int ret = esb_swap_pair(id_a, id_b);
+
+	if (ret == 0) {
+		return RCV_HID_ST_OK;
+	}
+	return ret == -ENOENT ? RCV_HID_ST_ENOENT : RCV_HID_ST_EINVAL;
+}
+
 uint8_t rcv_cmd_list(void)
 {
 	printk("Stored devices:\n");

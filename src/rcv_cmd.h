@@ -18,6 +18,8 @@ uint8_t rcv_cmd_exit_pair(void);
 uint8_t rcv_cmd_clear(void);
 uint8_t rcv_cmd_add(uint64_t addr, int8_t *slot_out);
 uint8_t rcv_cmd_remove(void);
+/* Exchange the stored addresses of two paired tracker ids. */
+uint8_t rcv_cmd_swap(uint8_t id_a, uint8_t id_b);
 uint8_t rcv_cmd_list(void);
 uint8_t rcv_cmd_channel_set(uint8_t channel);
 uint8_t rcv_cmd_channel_clear(void);

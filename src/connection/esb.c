@@ -2919,6 +2919,55 @@ void esb_pop_pair(void)
 	}
 }
 
+/* Exchange the stored addresses of two paired ids without re-pairing: both
+ * slots stay occupied, so the pairing store keeps its size and the tracker
+ * list seen by the host changes only by address association.
+ *
+ * Every per-id state that describes a device (sequence counters, statistics,
+ * TDMA shadow, ECAN battery cache, tracker event identity) belongs to the
+ * address, not to the slot, so it is reset for both ids: the physical
+ * trackers keep their own pairing and adopt the swapped ids when they rejoin.
+ */
+int esb_swap_pair(uint8_t id_a, uint8_t id_b)
+{
+	if (id_a == id_b) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	if (id_a >= stored_trackers || id_b >= stored_trackers) {
+		uint8_t count = stored_trackers;
+
+		k_mutex_unlock(&tracker_store_lock);
+		LOG_WRN("Cannot swap ids %u and %u, only %u devices stored", id_a, id_b, count);
+		return -ENOENT;
+	}
+
+	unsigned int key = irq_lock();
+	uint64_t tmp = stored_tracker_addr[id_a];
+
+	stored_tracker_addr[id_a] = stored_tracker_addr[id_b];
+	stored_tracker_addr[id_b] = tmp;
+	tracker_events_pairing_invalidate(BIT(id_a) | BIT(id_b));
+	irq_unlock(key);
+	tracker_events_pairing_cleanup();
+	k_mutex_unlock(&tracker_store_lock);
+
+	nvs_write_async(STORED_ADDR_0 + id_a, &stored_tracker_addr[id_a],
+			sizeof(stored_tracker_addr[0]));
+	nvs_write_async(STORED_ADDR_0 + id_b, &stored_tracker_addr[id_b],
+			sizeof(stored_tracker_addr[0]));
+
+	tdma_shadow_forget_tracker(id_a);
+	tdma_shadow_forget_tracker(id_b);
+	esb_reset_tracker_sequence(id_a);
+	esb_reset_tracker_sequence(id_b);
+
+	LOG_INF("Swapped ids %u and %u (%012llX <-> %012llX)", id_a, id_b, stored_tracker_addr[id_a],
+		stored_tracker_addr[id_b]);
+	return 0;
+}
+
 static bool esb_parse_pair(const uint8_t packet[8])
 {
 	uint64_t raw_addr = 0;

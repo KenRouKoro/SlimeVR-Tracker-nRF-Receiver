@@ -137,6 +137,7 @@ static void print_help(void)
 		"  reboot                     Soft reset the device\n"
 		"  add <address>              Manually add a device\n"
 		"  remove                     Remove last device\n"
+		"  swap <id_a> <id_b>         Swap tracker ids of two paired devices\n"
 		"  pair [count]               Enter pairing mode\n"
 		"    pair                     Pair indefinitely (timeout after %d seconds)\n"
 		"    pair 4                   Exit after pairing 4 new devices\n"
@@ -808,6 +809,7 @@ static void console_thread(void)
 	const char command_reboot[] = "reboot";
 	const char command_add[] = "add";
 	const char command_remove[] = "remove";
+	const char command_swap[] = "swap";
 	const char command_pair[] = "pair";
 	const char command_exit[] = "exit";
 	const char command_clear[] = "clear";
@@ -882,6 +884,37 @@ static void console_thread(void)
 			}
 		} else if (strcmp(argv[0], command_remove) == 0) {
 			rcv_cmd_remove();
+		} else if (strcmp(argv[0], command_swap) == 0) {
+			char *endptr;
+			long id_a = 0;
+			long id_b = 0;
+			bool valid = argc == 3;
+
+			if (valid) {
+				id_a = strtol(argv[1], &endptr, 10);
+				valid = (*endptr == '\0' && id_a >= 0 && id_a < MAX_TRACKERS);
+			}
+			if (valid) {
+				id_b = strtol(argv[2], &endptr, 10);
+				valid = (*endptr == '\0' && id_b >= 0 && id_b < MAX_TRACKERS);
+			}
+
+			if (!valid) {
+				printk("Usage: swap <id_a> <id_b> (ids 0..%d)\n", MAX_TRACKERS - 1);
+				continue;
+			}
+
+			uint8_t status = rcv_cmd_swap((uint8_t)id_a, (uint8_t)id_b);
+
+			if (status == RCV_HID_ST_OK) {
+				printk("Swapped ids %ld and %ld\n", id_a, id_b);
+				printk("Trackers keep their own pairing; they adopt the new ids"
+				       " when they rejoin\n");
+			} else if (status == RCV_HID_ST_ENOENT) {
+				printk("Id out of range, only %u devices paired\n", stored_trackers);
+			} else {
+				printk("Failed to swap ids\n");
+			}
 		} else if (strcmp(argv[0], command_list) == 0) {
 			rcv_cmd_list();
 		} else if (strcmp(argv[0], command_reboot) == 0) {

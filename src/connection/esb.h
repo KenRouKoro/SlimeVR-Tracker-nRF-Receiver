@@ -137,6 +137,8 @@ void esb_set_addr_unified(void);
 
 int esb_add_pair(uint64_t addr, bool checksum);
 void esb_pop_pair(void);
+/* Exchange the stored addresses of two paired tracker ids. */
+int esb_swap_pair(uint8_t id_a, uint8_t id_b);
 
 void esb_start_pairing(void);
 void esb_start_pairing_with_count(uint8_t target_count);
