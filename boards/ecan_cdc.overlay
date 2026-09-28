@@ -1,0 +1,11 @@
+/* ECAN-ECBT-16B posture stream: second CDC ACM port, paired with
+ * boards/ecan_cdc.conf. Mutually exclusive with
+ * boards/data_collect_cdc.overlay, which claims the same node. */
+&zephyr_udc0 {
+	cdc_acm_uart1: cdc_acm_uart1 {
+		compatible = "zephyr,cdc-acm-uart";
+		label = "ECAN-ECBT-16B";
+		tx-fifo-size = <4096>;
+		rx-fifo-size = <64>;
+	};
+};

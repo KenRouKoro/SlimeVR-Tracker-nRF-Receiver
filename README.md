@@ -146,6 +146,26 @@ cannot rearm a cancelled intention. These reasons do not prove the transition
 completed; rest observations retain their own domain-specific details. A delayed
 `BOOT`/`WAKE` does not erase observations already received in the same session.
 
+## ECAN-ECBT-16B serial output
+
+`boards/ecan_cdc.conf` + `boards/ecan_cdc.overlay` build a variant that streams
+fixed 16-byte `ECAN-ECBT-16B` posture frames on a second CDC ACM port
+(`cdc_acm_uart1`) instead of feeding poses to the HID report channel:
+
+```sh
+west build -b foxdongle33_uf2/nrf52833 -d build-ecan --pristine always . -- \
+  -DBOARD_ROOT=$PWD \
+  -DEXTRA_CONF_FILE=boards/ecan_cdc.conf \
+  -DEXTRA_DTC_OVERLAY_FILE=boards/ecan_cdc.overlay
+```
+
+`CONFIG_SLIMEVR_ECAN_STREAM=y` selects the pose sink; HID stays registered for
+tracker events, console commands and OTA. The ECAN CDC node replaces the raw
+collection port, so this overlay and `boards/data_collect_cdc.overlay` are
+mutually exclusive. Frame layout, field mapping and build details are in
+[ECAN-ECBT-16B.md](ECAN-ECBT-16B.md); `tests/host/ecan_frames` exercises the
+framing module without hardware.
+
 ## License
 Unless otherwise specified, all code in this repository is dual-licensed under either:
 

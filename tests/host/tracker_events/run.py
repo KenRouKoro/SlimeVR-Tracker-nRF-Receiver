@@ -22,6 +22,7 @@ import types
 CASES = ('golden', 'decoder', 'timeout', 'storage', 'nonce', 'sequence',
          'long-heartbeat', 'subscriptions', 'rest', 'independent', 'pairing',
          'rest-long-sequence', 'rest-delivery-retry', 'json-rest', 'composite',
+         'composite-ecan',
          'power-timeout', 'power-cancel', 'power-reanchor', 'power-expiry',
          'power-activity', 'power-new-operation', 'power-boot', 'power-clear',
          'power-reset', 'json-power', 'power-long-sequence', 'power-long-reanchor')
@@ -44,6 +45,10 @@ static inline void k_spin_unlock(struct k_spinlock *s, k_spinlock_key_t key) { (
 #define K_NO_WAIT 0
 #define K_MSEC(ms) (ms)
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+#define IS_ENABLED(x) (x)
+#ifndef CONFIG_SLIMEVR_ECAN_STREAM
+#define CONFIG_SLIMEVR_ECAN_STREAM 0
+#endif
 #define MIN(a,b) ((a)<(b)?(a):(b))
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #define BIT(n) (1U<<(n))
@@ -162,6 +167,17 @@ def main():
             '-o',str(binary),
         ]
         subprocess.run(command,check=True)
+        # Same extracted path with the ECAN pose stream enabled: the info
+        # sub-packet must reach the sink before the pose sub-packets.
+        ecan_binary = path/'test_ecan'
+        ecan_command = shlex.split(os.environ.get('CC','cc')) + [
+            '-std=c11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
+            '-Wno-unused-parameter','-DCONFIG_SLIMEVR_ECAN_STREAM=1','-DHOST_ECAN_ORDER',
+            '-I'+str(path),'-I'+str(root/'src'),
+            str(root/'src/tracker_events.c'), str(Path(__file__).with_name('fixture.c')),
+            '-o',str(ecan_binary),
+        ]
+        subprocess.run(ecan_command,check=True)
         if args.wire_input is not None:
             completed = subprocess.run([str(binary),'replay'],input=args.wire_input.read_text(),
                                        text=True,capture_output=True,check=True)
@@ -178,10 +194,15 @@ def main():
             logging_spec.loader.exec_module(logging_module)
             logging_module.logging_cases(client)
         for case in args.case or CASES:
-            completed = subprocess.run([str(binary),case],text=True,capture_output=True)
+            runner = binary
+            fixture_case = case
+            if case=='composite-ecan':
+                runner = ecan_binary
+                fixture_case = 'composite'
+            completed = subprocess.run([str(runner),fixture_case],text=True,capture_output=True)
             if completed.returncode:
                 sys.stderr.write(completed.stderr)
-                raise subprocess.CalledProcessError(completed.returncode, [str(binary),case])
+                raise subprocess.CalledProcessError(completed.returncode, [str(runner),fixture_case])
             if case=='golden':
                 parser_cases(client,bytes.fromhex(completed.stdout.strip()))
             if case=='json-rest':

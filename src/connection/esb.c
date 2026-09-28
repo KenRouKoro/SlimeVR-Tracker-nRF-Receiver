@@ -33,11 +33,43 @@
 #include "hid.h"
 #include "system/system.h"
 #include "data_collect.h"
+#include "ecan.h"
 #include "esb_ota.h"
 #include "tracker_events.h"
 #include "tracker_event_protocol.h"
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
+
+/* Pose sink: with CONFIG_SLIMEVR_ECAN_STREAM the dongle feeds the
+ * ECAN-ECBT-16B serial stream instead of the HID report path. HID stays
+ * registered for tracker events, console commands and OTA. */
+static inline void pose_sink_write(const uint8_t *data, uint8_t rssi)
+{
+	if (IS_ENABLED(CONFIG_SLIMEVR_ECAN_STREAM)) {
+		ecan_handle_packet(data, rssi);
+	} else {
+		hid_write_packet_n(data, rssi);
+	}
+}
+
+static inline uint32_t pose_sink_current_tps(void)
+{
+	return IS_ENABLED(CONFIG_SLIMEVR_ECAN_STREAM) ? ecan_get_current_tps()
+						      : hid_get_current_tps();
+}
+
+static inline uint32_t pose_sink_total_drop_count(void)
+{
+	return IS_ENABLED(CONFIG_SLIMEVR_ECAN_STREAM) ? ecan_get_total_drop_count()
+						      : hid_get_total_drop_count();
+}
+
+static inline uint32_t pose_sink_tracker_drop_count(uint8_t tracker_id)
+{
+	return IS_ENABLED(CONFIG_SLIMEVR_ECAN_STREAM)
+		       ? ecan_get_total_tracker_drop_count(tracker_id)
+		       : hid_get_total_tracker_drop_count(tracker_id);
+}
 
 //|type    |description
 //|RX  CRC8|pairing
@@ -2406,8 +2438,7 @@ void event_handler(struct esb_evt const *event)
 					stats->status_received = 0;
 					stats->status_lost = 0;
 				}
-				hid_write_packet_n(rx_payload.data,
-								   rx_payload.rssi); // write to hid endpoint
+				pose_sink_write(rx_payload.data, rx_payload.rssi); // write to pose sink
 			} break;
 			default: {
 				/* OTA packets from tracker (status, firmware info) */
@@ -2537,37 +2568,57 @@ void event_handler(struct esb_evt const *event)
 					);
 				}
 
-				/* Parse sub-packets and reconstruct standard 16-byte packets */
-				int pos = 3;                     /* skip header: type, id, sub_count */
-				int end = rx_payload.length - 1; /* exclude sequence byte */
+				/* Parse sub-packets and reconstruct standard 16-byte packets.
+				 * ECAN frames embed the cached battery/temperature and the
+				 * tracker appends its info sub-packet after the quat ones, so
+				 * info sub-packets (0/2) must be applied before the pose
+				 * sub-packets of the same bundle: pass 0 handles those, pass 1
+				 * the rest. Without the ECAN stream a single pass suffices. */
+				const int passes = IS_ENABLED(CONFIG_SLIMEVR_ECAN_STREAM) ? 2 : 1;
 
-				for (int i = 0; i < sub_count && pos < end; i++) {
-					uint8_t sub_type = rx_payload.data[pos++];
-					int sub_len = composite_body_length(sub_type);
+				for (int pass = 0; pass < passes; pass++) {
+					int pos = 3;                     /* skip header: type, id, sub_count */
+					int end = rx_payload.length - 1; /* exclude sequence byte */
 
-					if (sub_len < 0 || pos + sub_len > end) {
-						break;
+					for (int i = 0; i < sub_count && pos < end; i++) {
+						uint8_t sub_type = rx_payload.data[pos++];
+						int sub_len = composite_body_length(sub_type);
+
+						if (sub_len < 0 || pos + sub_len > end) {
+							break;
+						}
+
+						if (IS_ENABLED(CONFIG_SLIMEVR_ECAN_STREAM)) {
+							/* Type 2 carries battery/temperature too,
+							 * so it belongs to the info pass. */
+							bool is_info = (sub_type == 0 || sub_type == 2);
+
+							if ((pass == 0) != is_info) {
+								pos += sub_len;
+								continue;
+							}
+						}
+
+						/* Reconstruct a standard 16-byte packet */
+						uint8_t pkt[16] = {0};
+						pkt[0] = sub_type;
+						pkt[1] = tracker_id;
+						memcpy(&pkt[2], &rx_payload.data[pos], MIN(sub_len, 14));
+
+						/* For status packets (type 3), fill packet loss stats */
+						if (sub_type == 3) {
+							struct packet_stats *stats = &tracker_stats[tracker_id];
+							pkt[4] = stats->status_received;
+							pkt[5] = stats->status_lost;
+							pkt[6] = 0;
+							pkt[7] = 0;
+							stats->status_received = 0;
+							stats->status_lost = 0;
+						}
+
+						pose_sink_write(pkt, rx_payload.rssi);
+						pos += sub_len;
 					}
-
-					/* Reconstruct a standard 16-byte packet */
-					uint8_t pkt[16] = {0};
-					pkt[0] = sub_type;
-					pkt[1] = tracker_id;
-					memcpy(&pkt[2], &rx_payload.data[pos], MIN(sub_len, 14));
-
-					/* For status packets (type 3), fill packet loss stats */
-					if (sub_type == 3) {
-						struct packet_stats *stats = &tracker_stats[tracker_id];
-						pkt[4] = stats->status_received;
-						pkt[5] = stats->status_lost;
-						pkt[6] = 0;
-						pkt[7] = 0;
-						stats->status_received = 0;
-						stats->status_lost = 0;
-					}
-
-					hid_write_packet_n(pkt, rx_payload.rssi);
-					pos += sub_len;
 				}
 			} break;
 			}
@@ -3019,6 +3070,7 @@ void esb_clear(void)
 	LOG_INF("Packet sequence state and statistics reset for all trackers");
 
 	hid_reset_all_rssi_smooth();
+	ecan_reset_all();
 	esb_clearing = false;
 }
 
@@ -3036,6 +3088,8 @@ void esb_reset_tracker_sequence(uint8_t tracker_id)
 		memset(&tracker_stats[tracker_id], 0, sizeof(struct packet_stats));
 		// Reset RSSI smoothing state
 		hid_reset_rssi_smooth(tracker_id);
+		// Reset cached battery/temperature for the ECAN stream
+		ecan_reset_tracker(tracker_id);
 		LOG_INF("Packet sequence state and statistics reset for tracker %d", tracker_id);
 	}
 }
@@ -3553,7 +3607,7 @@ void esb_print_health_snapshot(void)
 
 	uint32_t desired_mask = (uint32_t)atomic_get(&tdma_shadow_desired_mask);
 	LOG_INF(
-		"HEALTH TDMA source=data_ping_shadow stored=%u active=%u mask=0x%04x desired=0x%04x recent=0x%04x slot=%u epoch=%u TPS=%u HID=%u recv=%u gaps=%u hid_drop_total=%u cap=%u lvl=%u/%u loss_pm=%u trig=%u rec=%u probe=%u step_ms=%lld",
+		"HEALTH TDMA source=data_ping_shadow stored=%u active=%u mask=0x%04x desired=0x%04x recent=0x%04x slot=%u epoch=%u TPS=%u out=%u recv=%u gaps=%u out_drop_total=%u cap=%u lvl=%u/%u loss_pm=%u trig=%u rec=%u probe=%u step_ms=%lld",
 		stored_trackers,
 		tdma_dynamic_active_count,
 		(unsigned int)tdma_active_mask,
@@ -3562,10 +3616,10 @@ void esb_print_health_snapshot(void)
 		tdma_dynamic_slot_ticks,
 		tdma_config_epoch,
 		total_tps,
-		hid_get_current_tps(),
+		pose_sink_current_tps(),
 		total_received,
 		total_gaps,
-		hid_get_total_drop_count(),
+		pose_sink_total_drop_count(),
 		tdma_cap_ladder[tdma_cap_level],
 		tdma_cap_level,
 		(uint8_t)TDMA_CAP_LEVEL_MAX,
@@ -3664,14 +3718,14 @@ void esb_print_health_snapshot(void)
 			);
 		}
 		LOG_INF(
-			"HEALTH trk=%u TPS=%u recv=%u gaps=%u restart=%u age_ms=%llu hid_drop_total=%u",
+			"HEALTH trk=%u TPS=%u recv=%u gaps=%u restart=%u age_ms=%llu out_drop_total=%u",
 			i,
 			stats->current_tps,
 			stats->total_received,
 			stats->total_gaps,
 			stats->restart_events,
 			age_ms,
-			hid_get_total_tracker_drop_count(i)
+			pose_sink_tracker_drop_count(i)
 		);
 	}
 }

@@ -41,7 +41,8 @@ static void tdma_check_slot(uint8_t tracker, unsigned ticks, uint8_t rssi) {
 static void tdma_shadow_observe(uint8_t tracker, int kind) {
     assert(tracker==2 && kind==TDMA_SHADOW_EVIDENCE_DATA); evidence_calls++;
 }
-static void hid_write_packet_n(const uint8_t packet[16], uint8_t rssi) {
+/* Pose sink the extracted composite path calls (see pose_sink_write in esb.c). */
+static void pose_sink_write(const uint8_t packet[16], uint8_t rssi) {
     (void)rssi; assert(pose_count<8); memcpy(poses[pose_count++],packet,16);
 }
 #define tracker_events_pairing_cleanup checked_cleanup
@@ -56,8 +57,16 @@ static void composite(void) {
     rx_payload.data[32]=0x99; rx_payload.data[33]=0xab;
     rx_payload.data[34]=42; rx_payload.length=35;
     composite_receive();
-    assert(pose_count==2 && poses[0][0]==1 && poses[1][0]==0);
+    assert(pose_count==2);
+#ifdef HOST_ECAN_ORDER
+    /* The ECAN framing needs the cached battery/temperature before the pose
+     * sub-packets of the same bundle are framed, so info is delivered first. */
+    assert(poses[0][0]==0 && poses[1][0]==1);
+    assert(poses[0][2]==0x22 && poses[1][2]==0x11);
+#else
+    assert(poses[0][0]==1 && poses[1][0]==0);
     assert(poses[0][2]==0x11 && poses[1][2]==0x22);
+#endif
     assert(sequence_calls==1 && last_sequence==42 && slot_calls==1 && evidence_calls==1);
     sequence_result=4; composite_receive(); assert(pose_count==2 && sequence_calls==2);
     sequence_result=2; composite_receive(); assert(pose_count==2 && sequence_calls==3);

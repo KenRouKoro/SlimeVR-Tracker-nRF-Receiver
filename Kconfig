@@ -96,6 +96,16 @@ config DATA_COLLECT_HID
         When enabled, raw data is sent via a dedicated HID endpoint.
         When disabled, raw data is sent via a second CDC ACM serial port.
 
+config SLIMEVR_ECAN_STREAM
+    bool "Enable ECAN-ECBT-16B serial posture stream"
+    default n
+    help
+        Frame tracker quaternions, battery level and magnetic disturbance
+        into fixed 16-byte ECAN-ECBT-16B packets on the dedicated CDC ACM
+        port (cdc_acm_uart1, see boards/ecan_cdc.overlay). Pose packets then
+        feed this stream instead of the HID report path; HID stays available
+        for tracker events, commands and OTA.
+
 config SLIMEVR_USB_DEVICE_VID
     hex "SlimeVR USB vendor ID"
     default 0x1209
